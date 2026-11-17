@@ -1,0 +1,9 @@
+services:
+  weak-creds:
+    build: .
+    container_name: arena-weak-creds
+    ports:
+      - "2222:22"
+      - "2121:21"
+    mem_limit: 1g
+    restart: unless-stopped

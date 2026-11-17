@@ -1,0 +1,8 @@
+services:
+  osint:
+    build: .
+    container_name: arena-osint
+    ports:
+      - "5001:5001"
+    mem_limit: 2g
+    restart: unless-stopped

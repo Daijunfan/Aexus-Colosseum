@@ -1,0 +1,9 @@
+services:
+  rev-lab:
+    build: .
+    container_name: arena-rev-lab
+    command: ["sleep", "infinity"]
+    volumes:
+      - /srv/arena/shared:/shared
+    mem_limit: 3g
+    restart: unless-stopped

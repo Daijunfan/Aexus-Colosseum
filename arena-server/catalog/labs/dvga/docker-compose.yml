@@ -1,0 +1,8 @@
+services:
+  dvga:
+    image: dolevf/dvga:latest
+    container_name: arena-dvga
+    ports:
+      - "5013:5013"
+    mem_limit: 1g
+    restart: unless-stopped

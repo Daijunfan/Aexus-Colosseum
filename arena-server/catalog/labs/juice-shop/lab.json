@@ -1,0 +1,39 @@
+{
+  "source": "curated",
+  "difficulty": 3,
+  "tags": [
+    "OWASP",
+    "Node.js",
+    "SQL 注入",
+    "XSS",
+    "JWT",
+    "业务逻辑"
+  ],
+  "mitre": [
+    "T1190",
+    "T1059"
+  ],
+  "access": [
+    {
+      "label": "Juice Shop",
+      "port": 3000,
+      "scheme": "http",
+      "path": "/"
+    }
+  ],
+  "credentials": "自行注册账号；管理员挑战需先完成前置关卡",
+  "notes": "",
+  "cpu": 2.5,
+  "ram_mb": 4096,
+  "build": false,
+  "id": "juice-shop",
+  "name": "OWASP Juice Shop",
+  "subtitle": "现代 Web 靶场 · 综合渗透",
+  "category": "web",
+  "summary": "OWASP 官方旗舰靶场，覆盖 OWASP Top 10 的 100+ 挑战，从信息泄露一路打到 RCE 与加密缺陷。",
+  "objectives": [
+    "完成「登录管理员」与「数据库架构」两条主线",
+    "利用 SQL 注入 / NoSQL 注入拿到用户数据",
+    "用 JWT 缺陷与越权接口提权"
+  ]
+}

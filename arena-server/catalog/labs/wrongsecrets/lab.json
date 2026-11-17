@@ -1,0 +1,37 @@
+{
+  "source": "curated",
+  "difficulty": 3,
+  "tags": [
+    "OWASP",
+    "Secret",
+    "Kubernetes",
+    "云原生",
+    "CTF"
+  ],
+  "mitre": [
+    "T1552",
+    "T1190"
+  ],
+  "access": [
+    {
+      "label": "WrongSecrets",
+      "port": 8084,
+      "scheme": "http",
+      "path": "/"
+    }
+  ],
+  "credentials": "无",
+  "notes": "",
+  "cpu": 2.5,
+  "ram_mb": 4096,
+  "build": false,
+  "id": "wrongsecrets",
+  "name": "OWASP WrongSecrets",
+  "subtitle": "云原生密钥泄露靶场",
+  "category": "cloud",
+  "summary": "以「找 flag」驱动的密钥管理靶场，覆盖硬编码、环境变量、K8s Secret、Vault 与 CI/CD 泄露。",
+  "objectives": [
+    "收集至少 10 个不同来源的 flag",
+    "理解密钥在容器与编排系统中的常见泄露路径"
+  ]
+}

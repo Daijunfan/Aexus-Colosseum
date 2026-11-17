@@ -1,0 +1,9 @@
+services:
+  forensics:
+    build: .
+    container_name: arena-forensics
+    command: ["sleep", "infinity"]
+    volumes:
+      - /srv/arena/shared:/shared
+    mem_limit: 3g
+    restart: unless-stopped

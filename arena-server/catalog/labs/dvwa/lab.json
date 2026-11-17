@@ -1,0 +1,37 @@
+{
+  "source": "curated",
+  "difficulty": 1,
+  "tags": [
+    "PHP",
+    "SQL 注入",
+    "XSS",
+    "文件包含",
+    "命令执行"
+  ],
+  "mitre": [
+    "T1190"
+  ],
+  "access": [
+    {
+      "label": "DVWA",
+      "port": 8081,
+      "scheme": "http",
+      "path": "/login.php"
+    }
+  ],
+  "credentials": "admin / password",
+  "notes": "首次进入后点击 Create / Reset Database 初始化。",
+  "cpu": 2.0,
+  "ram_mb": 2048,
+  "build": false,
+  "id": "dvwa",
+  "name": "DVWA",
+  "subtitle": "Damn Vulnerable Web Application",
+  "category": "web",
+  "summary": "最经典的教学型 Web 靶场，四档难度可调，适合建立从手工测试到自动化利用的完整肌肉记忆。",
+  "objectives": [
+    "在 Low / Medium / High 三档下分别完成 SQL 注入与命令执行",
+    "对比白盒源码理解过滤绕过原理",
+    "使用 sqlmap / Burp 复现并记录证据链"
+  ]
+}

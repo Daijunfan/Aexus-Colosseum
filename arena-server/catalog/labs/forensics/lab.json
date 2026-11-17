@@ -1,0 +1,32 @@
+{
+  "source": "curated",
+  "difficulty": 3,
+  "tags": [
+    "Volatility3",
+    "SleuthKit",
+    "tshark",
+    "YARA",
+    "binwalk"
+  ],
+  "mitre": [
+    "T1005",
+    "T1071"
+  ],
+  "access": [],
+  "credentials": "",
+  "notes": "样本与练习说明位于 /cases。",
+  "cpu": 2.5,
+  "ram_mb": 4096,
+  "build": true,
+  "id": "forensics",
+  "name": "数字取证工作站",
+  "subtitle": "内存 / 磁盘 / 流量三录合一",
+  "category": "forensics",
+  "summary": "预装 Volatility3、SleuthKit、Autopsy CLI 工具链、tshark、YARA、binwalk、foremost 的取证分析台。",
+  "objectives": [
+    "对提供的样本镜像完成进程、网络与注册表时间线提取",
+    "用 tshark 还原一次 C2 会话",
+    "编写一条 YARA 规则命中样本特征"
+  ],
+  "terminal": "docker exec -it arena-forensics bash"
+}

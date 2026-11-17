@@ -1,0 +1,32 @@
+{
+  "source": "curated",
+  "difficulty": 3,
+  "tags": [
+    "ICS",
+    "Modbus",
+    "Conpot",
+    "PLC",
+    "蜜罐"
+  ],
+  "mitre": [
+    "T1046",
+    "T0836"
+  ],
+  "access": [],
+  "credentials": "",
+  "notes": "Modbus 端口 502、S7 端口 102 在容器内；可在攻击盒中使用 nmap -p 502,102。",
+  "cpu": 2.0,
+  "ram_mb": 2048,
+  "build": true,
+  "id": "ot-lab",
+  "name": "工控协议靶场",
+  "subtitle": "Modbus / S7 与蜜罐",
+  "category": "misc",
+  "summary": "基于 Conpot 的工控蜜罐与 Modbus 调试环境，练习工控资产识别、协议交互与安全评估。",
+  "objectives": [
+    "用 nmap NSE 识别 Modbus 与 S7 服务",
+    "读写保持寄存器并分析协议字段",
+    "对照 IEC 62443 梳理暴露面与加固建议"
+  ],
+  "terminal": "docker exec -it arena-ot-lab bash"
+}

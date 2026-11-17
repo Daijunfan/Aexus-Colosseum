@@ -1,0 +1,9 @@
+services:
+  gophish:
+    image: gophish/gophish:latest
+    container_name: arena-gophish
+    ports:
+      - "3333:3333"
+      - "8087:80"
+    mem_limit: 1g
+    restart: unless-stopped

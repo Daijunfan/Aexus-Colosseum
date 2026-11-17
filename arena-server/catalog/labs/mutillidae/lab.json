@@ -1,0 +1,39 @@
+{
+  "source": "curated",
+  "difficulty": 2,
+  "tags": [
+    "OWASP",
+    "PHP",
+    "MySQL",
+    "SQL 注入",
+    "XSS",
+    "LFI"
+  ],
+  "mitre": [
+    "T1190",
+    "T1059"
+  ],
+  "access": [
+    {
+      "label": "Mutillidae",
+      "port": 8080,
+      "scheme": "http",
+      "path": "/"
+    }
+  ],
+  "credentials": "首次访问按提示安装数据库；默认 admin / admin",
+  "notes": "镜像内置 Apache + PHP + MySQL，首次启动需在页面点击 setup 初始化数据库。",
+  "cpu": 2.0,
+  "ram_mb": 2048,
+  "build": false,
+  "id": "mutillidae",
+  "name": "OWASP Mutillidae II",
+  "subtitle": "漏洞大全 · Web 综合靶场",
+  "category": "web",
+  "summary": "覆盖 OWASP Top 10 的自由开源 Web 靶场，内置数十类漏洞与循序渐进的教学提示，适合系统性刷题。",
+  "objectives": [
+    "从 SQL 注入、XSS 与文件包含一路打到命令执行",
+    "利用 DVWA 之外的场景练习绕过与编码技巧",
+    "对照提示完成 OWASP Top 10 练习清单"
+  ]
+}

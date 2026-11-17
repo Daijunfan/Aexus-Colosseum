@@ -1,0 +1,37 @@
+{
+  "source": "curated",
+  "difficulty": 2,
+  "tags": [
+    "钓鱼",
+    "邮件",
+    "红队",
+    "社会工程"
+  ],
+  "mitre": [
+    "T1566",
+    "T1204"
+  ],
+  "access": [
+    {
+      "label": "GoPhish 管理台",
+      "port": 3333,
+      "scheme": "https",
+      "path": "/"
+    }
+  ],
+  "credentials": "首次启动日志中生成随机管理员密码",
+  "notes": "内置 HTTPS 自签证书，浏览器需放行。",
+  "cpu": 2.0,
+  "ram_mb": 2048,
+  "build": false,
+  "id": "gophish",
+  "name": "GoPhish 钓鱼平台",
+  "subtitle": "红队钓鱼演练",
+  "category": "redteam",
+  "summary": "开源钓鱼框架，包含活动管理、邮件模板、落地页与统计面板，适合在授权范围内演练邮件钓鱼全流程。",
+  "objectives": [
+    "配置 SMTP 发送配置与目标组",
+    "制作带跟踪的钓鱼邮件与克隆落地页",
+    "观察打开、点击、提交凭据的完整漏斗"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "source": "curated",
+  "difficulty": 3,
+  "tags": [
+    "pwntools",
+    "pwndbg",
+    "ROP",
+    "堆",
+    "gdb"
+  ],
+  "mitre": [
+    "T1203"
+  ],
+  "access": [],
+  "credentials": "",
+  "notes": "工作目录 /shared/pwn；how2heap 位于 /shared/how2heap。",
+  "cpu": 4.0,
+  "ram_mb": 6144,
+  "build": false,
+  "id": "pwnbox",
+  "name": "PwnBox",
+  "subtitle": "二进制利用工作站",
+  "category": "binary",
+  "summary": "预装 pwntools、pwndbg、one_gadget、ROPgadget 的利用工作站，附带 how2heap 学习仓库。",
+  "objectives": [
+    "在 how2heap 中复现 fastbin / tcache 攻击",
+    "用 pwntools 编写远程 exploit 模板",
+    "用 pwndbg 调试栈溢出与 ROP 链"
+  ],
+  "terminal": "docker exec -it arena-pwnbox bash"
+}

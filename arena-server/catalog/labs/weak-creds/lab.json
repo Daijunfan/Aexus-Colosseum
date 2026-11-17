@@ -1,0 +1,44 @@
+{
+  "source": "curated",
+  "difficulty": 1,
+  "tags": [
+    "Hydra",
+    "SSH",
+    "FTP",
+    "字典",
+    "横向"
+  ],
+  "mitre": [
+    "T1110",
+    "T1078"
+  ],
+  "access": [
+    {
+      "label": "SSH",
+      "port": 2222,
+      "scheme": "ssh",
+      "path": ""
+    },
+    {
+      "label": "FTP",
+      "port": 2121,
+      "scheme": "ftp",
+      "path": ""
+    }
+  ],
+  "credentials": "通过字典攻击获取；范围 alice / bob / root",
+  "notes": "",
+  "cpu": 2.0,
+  "ram_mb": 2048,
+  "build": true,
+  "id": "weak-creds",
+  "name": "弱口令服务靶机",
+  "subtitle": "SSH / FTP 凭据攻击",
+  "category": "network",
+  "summary": "为口令攻击训练准备的双服务靶机：真实 sshd 与 vsftpd，存在可被字典命中的用户与一个 flag 文件。",
+  "objectives": [
+    "用 nmap 识别服务并生成目标清单",
+    "用 hydra 对 SSH 与 FTP 做字典攻击",
+    "登录后查找并提交 flag，练习最小痕迹操作"
+  ]
+}

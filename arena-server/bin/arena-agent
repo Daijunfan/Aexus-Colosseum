@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""arena-agent — minimal heartbeat emitter for an Arena-managed host.
+
+There is no heartbeat collector service yet, so this script deliberately
+does NOT open an HTTP server.  It emits a heartbeat JSON object (once, or
+every --interval seconds) and the Arena side ingests it with:
+
+    arena-agent --once > /tmp/heartbeat.json
+    arenactl events agent-report "$ARENA_EVENT" "$ARENA_HOST" \
+        "$(cat /tmp/heartbeat.json)"
+
+Environment:
+    ARENA_EVENT   event id, e.g. e-9a0e593d        (or --event)
+    ARENA_HOST    host id,  e.g. h-a229f905        (or --host)
+    ARENA_ROLE    role reported for this host      (default: observer)
+    ARENA_API     reserved for a future collector, e.g. http://arena:8790.
+                  Currently unused: ingestion goes through
+                  `arenactl events agent-report`, not HTTP.
+
+Heartbeat fields:
+    event_id, host_id, hostname, role, load (1/5/15 min averages), seen (UTC ISO)
+
+Usage:
+    arena-agent --once
+    arena-agent --interval 10 --out /var/lib/arena/heartbeat.json
+
+Only the Python standard library is used.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import socket
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+ID_RE = re.compile(r"^[a-z0-9-]+$")
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def load_average():
+    try:
+        return [round(x, 2) for x in os.getloadavg()]
+    except (AttributeError, OSError):
+        return None
+
+
+def heartbeat(event_id: str, host_id: str, role: str) -> dict:
+    return {
+        "event_id": event_id,
+        "host_id": host_id,
+        "hostname": socket.gethostname(),
+        "role": role,
+        "load": load_average(),
+        "seen": now(),
+    }
+
+
+def write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def emit(args) -> None:
+    text = json.dumps(heartbeat(args.event, args.host, args.role),
+                      ensure_ascii=False)
+    if args.out:
+        write_atomic(Path(args.out), text + "\n")
+    print(text, flush=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="arena-agent")
+    parser.add_argument("--event", default=os.environ.get("ARENA_EVENT", ""))
+    parser.add_argument("--host", default=os.environ.get("ARENA_HOST", ""))
+    parser.add_argument("--role", default=os.environ.get("ARENA_ROLE", "observer"))
+    parser.add_argument("--interval", type=float, default=0,
+                        help="seconds between heartbeats; 0 emits once")
+    parser.add_argument("--once", action="store_true",
+                        help="emit exactly one heartbeat (same as --interval 0)")
+    parser.add_argument("--out", default="",
+                        help="also atomically write the heartbeat to this file")
+    args = parser.parse_args()
+
+    if args.once:
+        args.interval = 0
+
+    if not args.event or not ID_RE.match(args.event):
+        parser.error("event id is required and must match ^[a-z0-9-]+$ "
+                     "(set ARENA_EVENT or --event)")
+    if not args.host or not ID_RE.match(args.host):
+        parser.error("host id is required and must match ^[a-z0-9-]+$ "
+                     "(set ARENA_HOST or --host)")
+    if args.interval < 0:
+        parser.error("--interval must be >= 0")
+
+    if args.interval == 0:
+        emit(args)
+        return 0
+    try:
+        while True:
+            emit(args)
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

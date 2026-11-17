@@ -1,0 +1,38 @@
+# OS & Editor
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# Secrets & Local Overrides
+.env
+.env.*
+*.local
+*.pem
+*.key
+
+# Node / Web UI Build Outputs
+node_modules/
+web-ui/node_modules/
+web-ui/dist/
+
+# Swift / macOS Build Outputs
+MacApp/.build/
+MacApp/.swiftpm/
+MacApp/dist/
+*.xcodeproj/
+*.xcworkspace/
+
+# Go / eBPF Compiled Binaries (keep embedded probes_bpfel.o tracked)
+arena-server/pitd/bin/
+arena-server/ebpf/dist/
+!arena-server/ebpf/bpf/probes_bpfel.o
+
+# Python Cache
+__pycache__/
+*.py[cod]
+
+# Heavy Local Video Recordings & Debug Logs (keep README screenshots & .pitreplay.html)
+artifacts/*.mp4
+artifacts/verification-*/

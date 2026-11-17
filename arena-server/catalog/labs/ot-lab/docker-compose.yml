@@ -1,0 +1,7 @@
+services:
+  ot-lab:
+    build: .
+    container_name: arena-ot-lab
+    command: ["conpot", "--template", "default", "--logfile", "/var/log/conpot.log"]
+    mem_limit: 1g
+    restart: unless-stopped

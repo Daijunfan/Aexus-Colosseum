@@ -1,0 +1,8 @@
+services:
+  wrongsecrets:
+    image: jeroenwillemsen/wrongsecrets:latest-no-vault
+    container_name: arena-wrongsecrets
+    ports:
+      - "8084:8080"
+    mem_limit: 2g
+    restart: unless-stopped

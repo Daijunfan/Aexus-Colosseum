@@ -1,0 +1,37 @@
+{
+  "source": "curated",
+  "difficulty": 3,
+  "tags": [
+    "GraphQL",
+    "API",
+    "注入",
+    "越权",
+    "批量查询"
+  ],
+  "mitre": [
+    "T1190"
+  ],
+  "access": [
+    {
+      "label": "DVGA",
+      "port": 5013,
+      "scheme": "http",
+      "path": "/"
+    }
+  ],
+  "credentials": "注册或使用默认演示账号",
+  "notes": "",
+  "cpu": 2.0,
+  "ram_mb": 2048,
+  "build": false,
+  "id": "dvga",
+  "name": "Damn Vulnerable GraphQL",
+  "subtitle": "GraphQL 专项靶场",
+  "category": "web",
+  "summary": "面向 GraphQL 的实战靶场，覆盖内省、注入、拒绝服务、批量查询与 IDOR 等 API 攻击面。",
+  "objectives": [
+    "完成内省查询与 schema 枚举",
+    "利用 GraphQL 注入与批量查询获取隐藏数据",
+    "用 graphql-cop 等工具做自动化审计"
+  ]
+}

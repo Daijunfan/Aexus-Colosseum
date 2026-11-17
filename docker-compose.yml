@@ -1,0 +1,23 @@
+services:
+  the-pit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: aexus-the-pit
+    ports:
+      - "18880:18880"
+    environment:
+      - PIT_ADDR=:18880
+      - PIT_WEB_DIR=/srv/arena/web-ui/dist
+      - PIT_GATEWAY_HOST=host.docker.internal
+      - PIT_UPSTREAM_BASE_URL=${PIT_UPSTREAM_BASE_URL:-}
+      - PIT_UPSTREAM_API_KEY=${PIT_UPSTREAM_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - pit-runtime:/tmp/pit-runtime
+    restart: unless-stopped
+
+volumes:
+  pit-runtime:

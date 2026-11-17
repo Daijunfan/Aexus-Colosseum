@@ -1,0 +1,2122 @@
+#!/usr/bin/env python3
+"""arenactl — the Arena guest-side control agent.
+
+Lives on the Arena VM at /usr/local/bin/arenactl.  Every command prints a
+single JSON object on stdout so the Mac app can consume it directly.
+
+Design rules:
+  * one environment runs at a time by default (memory-friendly; the UI says so)
+  * "install" materialises an environment from the on-disk source catalog
+  * "remove" deletes the environment *and* its images/volumes from disk, so it
+    can genuinely be re-downloaded later
+  * no command needs root (the ubuntu account is in the docker group)
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import platform
+import re
+import secrets
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(os.environ.get("ARENA_ROOT", "/srv/arena"))
+CATALOG = ROOT / "catalog"
+LABS = ROOT / "labs"
+SHARED = ROOT / "shared"
+LOGS = ROOT / "logs"
+STATE = ROOT / "state.json"
+LOCK = ROOT / ".arenactl.lock"
+
+# Persistent platform registry (hosts / topologies / events / agent heartbeats).
+PLATFORM = ROOT / "platform"
+HOSTS_FILE = PLATFORM / "hosts.json"
+TOPOLOGIES_FILE = PLATFORM / "topologies.json"
+EVENTS_FILE = PLATFORM / "events.json"
+AGENTS_DIR = PLATFORM / "agents"
+
+
+class ArenaError(Exception):
+    pass
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def load_json(path: Path, fallback=None):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return fallback
+
+
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write text atomically: temp file in the same directory, then os.replace."""
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def write_json(path: Path, obj) -> None:
+    write_text_atomic(path, json.dumps(obj, ensure_ascii=False, indent=2) + "\n")
+
+
+def lock(exclusive: bool = True):
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    fh = LOCK.open("a+")
+    fcntl.flock(fh, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+    return fh
+
+
+def run(args, *, cwd=None, timeout=60, check=False, env=None):
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
+                              timeout=timeout, env=env)
+    except FileNotFoundError:
+        raise ArenaError(f"command not found on Arena: {args[0]}")
+    except subprocess.TimeoutExpired:
+        raise ArenaError(f"command timed out: {' '.join(args[:2])}")
+    if check and proc.returncode != 0:
+        message = (proc.stderr or proc.stdout or "").strip()
+        raise ArenaError(message.splitlines()[-1] if message else f"command failed: {' '.join(args)}")
+    return proc
+
+
+def docker(*args, **kwargs):
+    return run(["docker", *args], **kwargs)
+
+
+def catalog() -> dict:
+    data = load_json(CATALOG / "catalog.json")
+    if not data:
+        raise ArenaError("catalog.json is missing; run provision.py on the server")
+    return data
+
+
+def lab_meta(lab_id: str) -> dict:
+    meta = load_json(CATALOG / "labs" / lab_id / "lab.json")
+    if not meta:
+        raise ArenaError(f"unknown environment: {lab_id}")
+    return meta
+
+
+def installed(lab_id: str) -> bool:
+    return (LABS / lab_id / "lab.json").is_file()
+
+
+def project(lab_id: str) -> str:
+    return "arena-" + re.sub(r"[^a-z0-9_-]", "-", lab_id.lower())
+
+
+def containers(lab_id: str) -> list[dict]:
+    proc = docker("ps", "-a", "--filter", f"label=com.docker.compose.project={project(lab_id)}",
+                  "--format", "{{.ID}}\t{{.State}}\t{{.Status}}\t{{.Names}}")
+    rows = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 4:
+            rows.append({"id": parts[0], "state": parts[1], "status": parts[2], "name": parts[3]})
+    return rows
+
+
+def memory_usage(lab_id: str) -> tuple[int, str]:
+    """Return (bytes, human string) for a project's running containers."""
+    ids = [c["id"] for c in containers(lab_id) if c["state"] == "running"]
+    if not ids:
+        return 0, ""
+    proc = docker("stats", "--no-stream", "--format", "{{.ID}}\t{{.MemUsage}}", *ids, timeout=30)
+    total = 0
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        raw = parts[1].split("/")[0].strip()
+        total += parse_size(raw)
+    return total, human(total)
+
+
+def parse_size(raw: str) -> int:
+    m = re.match(r"([0-9.]+)\s*([KMGTP]?i?B)", raw.strip(), re.I)
+    if not m:
+        return 0
+    value = float(m.group(1))
+    unit = m.group(2).lower()
+    factors = {
+        "b": 1, "kb": 1000, "kib": 1024, "mb": 1000**2, "mib": 1024**2,
+        "gb": 1000**3, "gib": 1024**3, "tb": 1000**4, "tib": 1024**4,
+    }
+    return int(value * factors.get(unit, 1))
+
+
+def human(n: int) -> str:
+    if n <= 0:
+        return ""
+    for unit, size in (("GiB", 1024**3), ("MiB", 1024**2), ("KiB", 1024)):
+        if n >= size:
+            return f"{n / size:.1f} {unit}"
+    return f"{n} B"
+
+
+def lab_state(lab_id: str) -> dict:
+    rows = containers(lab_id)
+    running = any(r["state"] == "running" for r in rows)
+    mem_bytes, mem_human = memory_usage(lab_id) if running else (0, "")
+    started = load_json(STATE, {}).get("labs", {}).get(lab_id, {}).get("started_at")
+    return {
+        "installed": installed(lab_id),
+        "running": running,
+        "containers": rows,
+        "mem_bytes": mem_bytes,
+        "mem_human": mem_human,
+        "started_at": started if running else None,
+    }
+
+
+def all_running() -> list[str]:
+    if not LABS.is_dir():
+        return []
+    return [d.name for d in LABS.iterdir() if d.is_dir() and lab_state(d.name)["running"]]
+
+
+def stop_lab(lab_id: str, *, quiet: bool = False) -> dict:
+    if not installed(lab_id):
+        return {"id": lab_id, "stopped": False, "detail": "not installed"}
+    meta = lab_meta(lab_id)
+    proc = docker("compose", "-p", project(lab_id), *compose_files(LABS / lab_id, meta),
+                  "down", "--remove-orphans", timeout=180)
+    state = load_json(STATE, {"labs": {}})
+    entry = state.setdefault("labs", {}).setdefault(lab_id, {})
+    entry.pop("started_at", None)
+    entry["stopped_at"] = now()
+    write_json(STATE, state)
+    result = {"id": lab_id, "stopped": proc.returncode == 0,
+              "detail": (proc.stderr or proc.stdout).strip()[:500]}
+    if not quiet and proc.returncode != 0:
+        raise ArenaError(result["detail"] or "docker compose down failed")
+    return result
+
+
+def install_lab(lab_id: str, *, pull: bool = True) -> dict:
+    meta = lab_meta(lab_id)
+    source = CATALOG / "labs" / lab_id
+    target = LABS / lab_id
+    if not installed(lab_id):
+        LABS.mkdir(parents=True, exist_ok=True)
+        tmp = LABS / (lab_id + ".installing")
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        shutil.copytree(source, tmp, symlinks=True)
+        os.replace(tmp, target)
+        detail = "installed"
+    else:
+        # The catalog is refreshed on every deploy.  Refresh an installed
+        # lab's compose/Dockerfile when the catalog copy is newer so a deploy
+        # actually takes effect; leave any hand-written override alone.
+        stale = False
+        for name in ("docker-compose.yml", "docker-compose.yaml", "compose.yml",
+                     "compose.yaml", "Dockerfile", "lab.json"):
+            src, dst = source / name, target / name
+            if src.is_file() and (not dst.is_file()
+                                  or src.stat().st_mtime > dst.stat().st_mtime + 1):
+                stale = True
+                break
+        if stale:
+            shutil.copytree(source, target, dirs_exist_ok=True, symlinks=True)
+            detail = "refreshed from catalog"
+        else:
+            detail = "already installed"
+    # Give every service memory/CPU limits (auto-loaded override file).
+    allocation = ensure_override(target, meta)
+    pull_result = None
+    if pull:
+        fargs = compose_files(target, meta)
+        # Mixed stacks need both their published images and local builds.
+        proc = docker("compose", "-p", project(lab_id), *fargs,
+                      "pull", "--ignore-buildable", cwd=str(target), timeout=3600)
+        if proc.returncode == 0 and (meta.get("build") or (target / "Dockerfile").exists()):
+            proc = docker("compose", "-p", project(lab_id), *fargs,
+                          "build", cwd=str(target), timeout=3600)
+        pull_result = {"ok": proc.returncode == 0,
+                       "detail": (proc.stderr or proc.stdout).strip()[-800:]}
+    result = {"id": lab_id, "installed": True, "detail": detail,
+              "allocation": allocation, "pull": pull_result}
+    if pull_result is not None and not pull_result["ok"]:
+        # The files were copied but the environment cannot start without its
+        # images, so report the failure instead of a false success.
+        result["ok"] = False
+        result["error"] = "镜像下载失败，请重试"
+    return result
+
+
+def start_lab(lab_id: str, *, exclusive: bool = True) -> dict:
+    meta = lab_meta(lab_id)
+    if not installed(lab_id):
+        install_lab(lab_id, pull=False)
+    stopped = []
+    if exclusive:
+        for other in all_running():
+            if other != lab_id:
+                stopped.append(stop_lab(other, quiet=True)["id"])
+    target = LABS / lab_id
+    compose = target / meta.get("compose", "docker-compose.yml")
+    if not compose.is_file():
+        raise ArenaError(f"compose file missing for {lab_id}")
+    allocation = ensure_override(target, meta)
+    build = bool(meta.get("build"))
+    args = ["compose", "-p", project(lab_id), *compose_files(target, meta),
+            "up", "-d", "--remove-orphans"]
+    if build:
+        args.append("--build")
+    proc = docker(*args, cwd=str(target), timeout=3600)
+    if proc.returncode != 0:
+        raise ArenaError((proc.stderr or proc.stdout).strip()[-800:] or "compose up failed")
+    state = load_json(STATE, {"labs": {}})
+    state.setdefault("labs", {}).setdefault(lab_id, {})["started_at"] = now()
+    state["last_lab"] = lab_id
+    write_json(STATE, state)
+    # Wait (briefly) for containers to settle so the app can show a real state.
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if lab_state(lab_id)["running"]:
+            break
+        time.sleep(0.5)
+    return {"id": lab_id, **lab_state(lab_id), "stopped_others": stopped,
+            "allocation": allocation,
+            "detail": (proc.stderr or "").strip()[:400]}
+
+
+def remove_lab(lab_id: str, *, keep_images: bool = False) -> dict:
+    lab_meta(lab_id)
+    target = LABS / lab_id
+    down_detail = ""
+    if installed(lab_id):
+        meta = lab_meta(lab_id)
+        args = ["compose", "-p", project(lab_id), *compose_files(target, meta),
+                "down", "-v", "--remove-orphans"]
+        if not keep_images:
+            args.append("--rmi")
+            args.append("all")
+        proc = docker(*args, cwd=str(target), timeout=600)
+        down_detail = (proc.stderr or proc.stdout).strip()[-400:]
+    # The lab directory holds the generated override, so it is removed with it.
+    if target.exists():
+        shutil.rmtree(target)
+    state = load_json(STATE, {"labs": {}})
+    state.get("labs", {}).pop(lab_id, None)
+    write_json(STATE, state)
+    freed = 0
+    return {"id": lab_id, "removed": True, "detail": down_detail,
+            "images_removed": not keep_images}
+
+
+def list_labs() -> dict:
+    cat = catalog()
+    labs = []
+    for meta in cat["labs"]:
+        st = lab_state(meta["id"])
+        labs.append({**meta, **st})
+    return {"ok": True, "categories": cat["categories"], "labs": labs,
+            "generated_at": cat.get("generated_at"), "running": all_running()}
+
+
+def info() -> dict:
+    mem = {}
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            k, v = line.split(":", 1)
+            mem[k] = int(v.strip().split()[0]) * 1024
+    except (OSError, ValueError):
+        pass
+    disk = shutil.disk_usage(str(ROOT))
+    system_disk = shutil.disk_usage("/")
+    cat = catalog()
+    installed_ids = [d.name for d in LABS.iterdir() if d.is_dir()] if LABS.is_dir() else []
+    docker_version = ""
+    try:
+        docker_version = docker("version", "--format", "{{.Server.Version}}", timeout=15).stdout.strip()
+    except (ArenaError, subprocess.SubprocessError, OSError):
+        pass
+    return {
+        "ok": True,
+        "hostname": platform.node(),
+        "uptime_seconds": int(float(Path("/proc/uptime").read_text().split()[0])),
+        "mem_total": mem.get("MemTotal", 0),
+        "mem_available": mem.get("MemAvailable", 0),
+        "disk_total": disk.total,
+        "disk_used": disk.used,
+        "disk_free": disk.free,
+        "system_disk_total": system_disk.total,
+        "system_disk_used": system_disk.used,
+        "system_disk_free": system_disk.free,
+        "docker": docker_version,
+        "catalog_labs": len(cat["labs"]),
+        "installed_labs": len(installed_ids),
+        "running": all_running(),
+        "state": load_json(STATE, {}),
+    }
+
+
+def library() -> dict:
+    data = load_json(SHARED / "library" / "manifest.json", {}) or {}
+    return {"ok": True, "status": data.get("status", "empty"),
+            "collections": data.get("collections", [])}
+
+
+# ---------------------------------------------------------------------------
+# Attack box (a Kali workstation, not a "lab" in the catalog sense)
+# ---------------------------------------------------------------------------
+
+def attackbox(action: str) -> dict:
+    target = SHARED / "attackbox"
+    compose = target / "docker-compose.yml"
+    if action == "start":
+        if not compose.is_file():
+            raise ArenaError("attack box is not provisioned")
+        proc = docker("compose", "-p", "arena-attackbox", "-f", str(compose),
+                      "up", "-d", "--build", cwd=str(target), timeout=3600)
+        if proc.returncode != 0:
+            raise ArenaError((proc.stderr or proc.stdout).strip()[-600:])
+        return {"ok": True, "started": True}
+    if action == "stop":
+        if compose.is_file():
+            docker("compose", "-p", "arena-attackbox", "-f", str(compose),
+                   "down", "--remove-orphans", cwd=str(target), timeout=120)
+        return {"ok": True, "stopped": True}
+    proc = docker("ps", "-a", "--filter", "name=arena-attackbox",
+                  "--format", "{{.Names}}\t{{.State}}\t{{.Status}}")
+    rows = [line.split("\t") for line in proc.stdout.splitlines()]
+    return {"ok": True, "containers": rows}
+
+
+# ---------------------------------------------------------------------------
+# Persistent platform registry: hosts, topologies, events, agent heartbeats
+# ---------------------------------------------------------------------------
+
+ID_RE = re.compile(r"^[a-z0-9-]+$")
+HOST_ROLES = ("attacker", "target", "observer", "service")
+TOPOLOGY_STATUSES = ("unknown", "ready", "partial", "offline")
+EVENT_FORMATS = ("awd", "koh", "custom")
+EVENT_STATUSES = ("draft", "running", "paused", "ended")
+WEB_PORT_HINTS = {80, 443, 3000, 4000, 5000, 5001, 7001, 8000, 8001, 8010,
+                  8080, 8081, 8082, 8083, 8084, 8085, 8086, 8087, 8088, 8090,
+                  8443, 8888, 8983, 9090, 10000}
+INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def check_id(value, what: str = "id") -> str:
+    if not isinstance(value, str) or not ID_RE.match(value):
+        raise ArenaError(f"invalid {what}: {value!r} (expected ^[a-z0-9-]+$)")
+    return value
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+def parse_payload(raw, *, what: str = "payload") -> dict:
+    if raw is None:
+        raise ArenaError(f"{what} is required")
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        raise ArenaError(f"invalid {what} JSON: {exc}")
+    if not isinstance(data, dict):
+        raise ArenaError(f"{what} must be a JSON object")
+    return data
+
+
+def registry_file(kind: str) -> Path:
+    return {"hosts": HOSTS_FILE, "topologies": TOPOLOGIES_FILE,
+            "events": EVENTS_FILE}[kind]
+
+
+def registry_load(kind: str) -> list:
+    data = load_json(registry_file(kind), {}) or {}
+    items = data.get(kind) if isinstance(data, dict) else None
+    return items if isinstance(items, list) else []
+
+
+def registry_save(kind: str, items: list) -> None:
+    write_json(registry_file(kind), {kind: items})
+
+
+def find_host(host_id: str) -> dict:
+    for host in registry_load("hosts"):
+        if host.get("id") == host_id:
+            return host
+    raise ArenaError(f"unknown host: {host_id}")
+
+
+def normalize_host(raw: dict, *, source: str | None = None) -> dict:
+    if not isinstance(raw, dict):
+        raise ArenaError("host must be a JSON object")
+    host = dict(raw)
+    if not host.get("id"):
+        host["id"] = new_id("h")
+    check_id(host["id"], "host id")
+    name = host.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ArenaError("host name is required")
+    role = host.get("role")
+    if role not in HOST_ROLES:
+        raise ArenaError("host role must be one of: " + ", ".join(HOST_ROLES))
+    address = host.get("address") or ""
+    if not isinstance(address, str):
+        raise ArenaError("host address must be a string")
+    ports = host.get("ports") or []
+    if not isinstance(ports, list):
+        raise ArenaError("host ports must be a list")
+    clean_ports = []
+    for item in ports:
+        try:
+            port = int(item)
+        except (TypeError, ValueError):
+            raise ArenaError(f"invalid port: {item!r}")
+        if not 0 <= port <= 65535:
+            raise ArenaError(f"port out of range: {port}")
+        clean_ports.append(port)
+    tags = host.get("tags") or []
+    if not isinstance(tags, list):
+        raise ArenaError("host tags must be a list")
+    notes = host.get("notes") or ""
+    if not isinstance(notes, str):
+        raise ArenaError("host notes must be a string")
+    for key in ("ssh", "docker"):
+        if host.get(key) is not None and not isinstance(host[key], dict):
+            raise ArenaError(f"host {key} must be an object")
+    if isinstance(host.get("ssh"), dict):
+        ssh = dict(host["ssh"])
+        try:
+            ssh["port"] = int(ssh.get("port") or 22)
+        except (TypeError, ValueError):
+            raise ArenaError("ssh.port must be an integer")
+        ssh["user"] = str(ssh.get("user") or "root")
+        ssh.setdefault("key", None)
+        ssh.setdefault("jump", None)
+        host["ssh"] = ssh
+    if isinstance(host.get("docker"), dict):
+        doc = dict(host["docker"])
+        if not doc.get("container"):
+            raise ArenaError("docker.container is required")
+        doc.setdefault("host", None)
+        host["docker"] = doc
+    host["name"] = name.strip()
+    host["address"] = address.strip()
+    host["ports"] = clean_ports
+    host["tags"] = tags
+    host["notes"] = notes
+    host["source"] = source or host.get("source") or "manual"
+    if host["source"] not in ("manual", "imported", "deployed"):
+        host["source"] = "manual"
+    host.setdefault("created_at", now())
+    return host
+
+
+def hosts_list() -> dict:
+    items = registry_load("hosts")
+    return {"ok": True, "hosts": items, "count": len(items)}
+
+
+def hosts_add(raw: dict) -> dict:
+    host = normalize_host(raw)
+    items = registry_load("hosts")
+    if any(h.get("id") == host["id"] for h in items):
+        raise ArenaError(f"host already exists: {host['id']}")
+    items.append(host)
+    registry_save("hosts", items)
+    return {"ok": True, "host": host, "count": len(items)}
+
+
+def hosts_update(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise ArenaError("host must be a JSON object")
+    host_id = raw.get("id")
+    items = registry_load("hosts")
+    index = next((i for i, h in enumerate(items) if h.get("id") == host_id), None)
+    if index is None:
+        raise ArenaError(f"unknown host: {host_id}")
+    existing = items[index]
+    merged = dict(existing)
+    for key, value in raw.items():
+        if key in ("id", "created_at", "updated_at"):
+            continue
+        # Merge nested connection blocks so a partial update keeps the
+        # fields that were not supplied.
+        if key in ("ssh", "docker") and isinstance(value, dict) \
+                and isinstance(existing.get(key), dict):
+            merged[key] = {**existing[key], **value}
+        else:
+            merged[key] = value
+    host = normalize_host(merged)
+    # Identity and lineage always belong to the stored record.
+    host["id"] = existing["id"]
+    if existing.get("created_at"):
+        host["created_at"] = existing["created_at"]
+    host["updated_at"] = now()
+    items[index] = host
+    registry_save("hosts", items)
+    return {"ok": True, "host": host, "count": len(items)}
+
+
+def hosts_remove(host_id: str) -> dict:
+    check_id(host_id, "host id")
+    items = registry_load("hosts")
+    remaining = [h for h in items if h.get("id") != host_id]
+    if len(remaining) == len(items):
+        raise ArenaError(f"unknown host: {host_id}")
+    registry_save("hosts", remaining)
+    return {"ok": True, "id": host_id, "removed": True, "count": len(remaining)}
+
+
+def hosts_import(path: str) -> dict:
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ArenaError(f"cannot read {path}: {exc}")
+    except ValueError as exc:
+        raise ArenaError(f"invalid JSON in {path}: {exc}")
+    if isinstance(raw, dict):
+        raw_hosts = raw.get("hosts")
+    elif isinstance(raw, list):
+        raw_hosts = raw
+    else:
+        raw_hosts = None
+    if not isinstance(raw_hosts, list):
+        raise ArenaError('import file must contain {"hosts": [...]}')
+    items = registry_load("hosts")
+    existing = {h.get("id") for h in items}
+    imported, skipped = [], 0
+    for entry in raw_hosts:
+        host = normalize_host(entry, source=(entry.get("source") if isinstance(entry, dict) else None) or "imported")
+        if host["id"] in existing:
+            skipped += 1
+            continue
+        items.append(host)
+        existing.add(host["id"])
+        imported.append(host)
+    registry_save("hosts", items)
+    return {"ok": True, "imported": len(imported), "skipped": skipped,
+            "hosts": imported, "count": len(items)}
+
+
+def hosts_export() -> dict:
+    items = registry_load("hosts")
+    return {"ok": True, "hosts": items, "count": len(items)}
+
+
+def tcp_probe(address: str, port: int, timeout: float = 2.0):
+    """Return (connected, latency_ms, error)."""
+    started = time.monotonic()
+    try:
+        with socket.create_connection((address, int(port)), timeout=timeout):
+            pass
+        return True, int(round((time.monotonic() - started) * 1000)), ""
+    except OSError as exc:
+        return False, None, str(exc)
+
+
+def ssh_probe(cfg: dict, address: str):
+    """Run a read-only BatchMode SSH command. Returns (ok, detail)."""
+    user = str(cfg.get("user") or "root")
+    port = cfg.get("port") or 22
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+           "-o", "StrictHostKeyChecking=accept-new"]
+    if cfg.get("key"):
+        cmd += ["-i", str(cfg["key"])]
+    if port:
+        cmd += ["-p", str(port)]
+    if cfg.get("jump"):
+        cmd += ["-J", str(cfg["jump"])]
+    cmd += [f"{user}@{address}", "printf ARENA_OK"]
+    try:
+        proc = run(cmd, timeout=12)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"ssh {user}@{address}:{port}: {exc}"
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    ok = proc.returncode == 0 and "ARENA_OK" in out
+    tail = (err or out).splitlines()[-1] if (err or out) else ""
+    return ok, f"ssh {user}@{address}:{port}: {'ok' if ok else 'failed'} {tail}"[:300]
+
+
+def probe_host(host: dict) -> dict:
+    """Probe a registry host from Arena: TCP ports, optional SSH and docker."""
+    address = (host.get("address") or "").strip()
+    ports = [p for p in (host.get("ports") or []) if isinstance(p, int)]
+    detail = []
+    tried = []
+    online = False
+    best_port = None
+    latency = None
+    for port in ports[:3]:
+        if not address:
+            break
+        connected, ms, err = tcp_probe(address, port)
+        tried.append({"port": port, "ok": connected, "latency_ms": ms})
+        if connected:
+            online = True
+            best_port = port
+            latency = ms
+            break
+        if err:
+            detail.append(f"tcp {address}:{port}: {err}")
+
+    ssh_ok = None
+    ssh_cfg = host.get("ssh") if isinstance(host.get("ssh"), dict) else None
+    if ssh_cfg and address:
+        ssh_ok, ssh_detail = ssh_probe(ssh_cfg, address)
+        detail.append(ssh_detail)
+
+    docker_ok = None
+    container_state = None
+    docker_cfg = host.get("docker") if isinstance(host.get("docker"), dict) else None
+    if docker_cfg and docker_cfg.get("container"):
+        container = docker_cfg["container"]
+        try:
+            proc = docker("inspect", "-f", "{{.State.Status}}", container, timeout=10)
+            container_state = (proc.stdout or "").strip() or None
+            docker_ok = proc.returncode == 0 and container_state == "running"
+            if not docker_ok:
+                err = (proc.stderr or "").strip()[:160]
+                detail.append(f"docker {container}: {container_state or err or 'not found'}")
+        except (OSError, subprocess.SubprocessError) as exc:
+            docker_ok = False
+            detail.append(f"docker {container}: {exc}")
+
+    # A host is online if any transport answered: a published TCP port, an
+    # SSH login, or a running managed container (docker-only attack boxes).
+    online = bool(online or ssh_ok or docker_ok)
+    reachable = online
+
+    return {
+        "ok": True,
+        "host_id": host.get("id"),
+        "online": online,
+        "reachable": reachable,
+        "ssh_ok": ssh_ok,
+        "docker_ok": docker_ok,
+        "latency_ms": latency,
+        "best_port": best_port,
+        "checked_from": "arena",
+        "detail": " | ".join(d for d in detail if d)[:500],
+        "ports_tried": tried,
+        "container_state": container_state,
+    }
+
+
+def hosts_probe(host_id: str) -> dict:
+    return probe_host(find_host(host_id))
+
+
+def hosts_probe_all() -> dict:
+    probes = [probe_host(h) for h in registry_load("hosts")]
+    return {"ok": True, "probes": probes,
+            "online": sum(1 for p in probes if p["online"]),
+            "total": len(probes)}
+
+
+def normalize_topology(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise ArenaError("topology must be a JSON object")
+    topo = dict(raw)
+    if not topo.get("id"):
+        topo["id"] = new_id("t")
+    check_id(topo["id"], "topology id")
+    name = topo.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ArenaError("topology name is required")
+    for key in ("target", "attacker"):
+        if not topo.get(key):
+            raise ArenaError(f"topology {key} host id is required")
+        check_id(topo[key], f"topology {key}")
+    topo["name"] = name.strip()
+    topo["network"] = str(topo.get("network") or "arena-lab")
+    status = topo.get("status") or "unknown"
+    topo["status"] = status if status in TOPOLOGY_STATUSES else "unknown"
+    topo.setdefault("created_at", now())
+    return topo
+
+
+def topologies_list() -> dict:
+    items = registry_load("topologies")
+    return {"ok": True, "topologies": items, "count": len(items)}
+
+
+def topologies_add(raw: dict) -> dict:
+    topo = normalize_topology(raw)
+    items = registry_load("topologies")
+    if any(t.get("id") == topo["id"] for t in items):
+        raise ArenaError(f"topology already exists: {topo['id']}")
+    items.append(topo)
+    registry_save("topologies", items)
+    return {"ok": True, "topology": topo, "count": len(items)}
+
+
+def topologies_remove(topology_id: str) -> dict:
+    check_id(topology_id, "topology id")
+    items = registry_load("topologies")
+    remaining = [t for t in items if t.get("id") != topology_id]
+    if len(remaining) == len(items):
+        raise ArenaError(f"unknown topology: {topology_id}")
+    registry_save("topologies", remaining)
+    return {"ok": True, "id": topology_id, "removed": True, "count": len(remaining)}
+
+
+def test_port_for(target: dict):
+    ports = [p for p in (target.get("ports") or []) if isinstance(p, int)]
+    preferred = [p for p in ports if p == 22 or p in WEB_PORT_HINTS]
+    if preferred:
+        return preferred[0]
+    return ports[0] if ports else None
+
+
+def attacker_to_target_check(attacker: dict, target: dict) -> dict:
+    port = test_port_for(target)
+    address = (target.get("address") or "").strip()
+    if port is None or not address:
+        return {"ok": True, "port": None, "detail": "no ports to test",
+                "method": None}
+    if not re.match(r"^[A-Za-z0-9_.:-]+$", address):
+        return {"ok": False, "port": port, "detail": "unsafe target address",
+                "method": None}
+    inner = (
+        "python3 -c 'import socket,sys; "
+        "socket.create_connection((sys.argv[1], int(sys.argv[2])), 2).close()' "
+        f"{address} {port} 2>/dev/null || nc -z -w 2 {address} {port}"
+    )
+    method = None
+    try:
+        if isinstance(attacker.get("ssh"), dict) and attacker.get("address"):
+            cfg = attacker["ssh"]
+            user = str(cfg.get("user") or "root")
+            sport = cfg.get("port") or 22
+            cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=4",
+                   "-o", "StrictHostKeyChecking=accept-new"]
+            if cfg.get("key"):
+                cmd += ["-i", str(cfg["key"])]
+            if sport:
+                cmd += ["-p", str(sport)]
+            if cfg.get("jump"):
+                cmd += ["-J", str(cfg["jump"])]
+            cmd += [f"{user}@{attacker['address']}", inner]
+            proc = run(cmd, timeout=15)
+            method = "ssh"
+        elif isinstance(attacker.get("docker"), dict) and attacker["docker"].get("container"):
+            proc = docker("exec", attacker["docker"]["container"], "sh", "-lc",
+                          inner, timeout=15)
+            method = "docker"
+        else:
+            return {"ok": None, "port": port,
+                    "detail": "attacker has no ssh/docker access", "method": None}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "port": port, "detail": str(exc), "method": method}
+    ok = proc.returncode == 0
+    tail = (proc.stderr or proc.stdout or "").strip()[-300:]
+    return {"ok": ok, "port": port, "method": method,
+            "detail": tail or ("tcp connect succeeded" if ok else "tcp connect failed")}
+
+
+def topology_test(topology_id: str) -> dict:
+    check_id(topology_id, "topology id")
+    items = registry_load("topologies")
+    topo = next((t for t in items if t.get("id") == topology_id), None)
+    if topo is None:
+        raise ArenaError(f"unknown topology: {topology_id}")
+    target = find_host(topo["target"])
+    attacker = find_host(topo["attacker"])
+    target_probe = probe_host(target)
+    attacker_probe = probe_host(attacker)
+    a2t = attacker_to_target_check(attacker, target)
+    if target_probe["online"] and attacker_probe["online"] and a2t["ok"] is True:
+        status = "ready"
+    elif target_probe["online"] or attacker_probe["online"]:
+        status = "partial"
+    else:
+        status = "offline"
+    topo["status"] = status
+    topo["checked_at"] = now()
+    registry_save("topologies", items)
+    return {"ok": True, "topology": topo, "target": target_probe,
+            "attacker": attacker_probe, "attacker_to_target": a2t,
+            "status": status}
+
+
+def normalize_event(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        raise ArenaError("event must be a JSON object")
+    event = dict(raw)
+    if not event.get("id"):
+        event["id"] = new_id("e")
+    check_id(event["id"], "event id")
+    name = event.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ArenaError("event name is required")
+    event["name"] = name.strip()
+    fmt = event.get("format") or "awd"
+    if fmt not in EVENT_FORMATS:
+        raise ArenaError("event format must be one of: " + ", ".join(EVENT_FORMATS))
+    event["format"] = fmt
+    status = event.get("status") or "draft"
+    if status not in EVENT_STATUSES:
+        raise ArenaError("event status must be one of: " + ", ".join(EVENT_STATUSES))
+    event["status"] = status
+    teams = event.get("teams") or []
+    if not isinstance(teams, list):
+        raise ArenaError("event teams must be a list")
+    clean_teams = []
+    for team in teams:
+        if not isinstance(team, dict):
+            raise ArenaError("each team must be an object")
+        team = dict(team)
+        if not team.get("id"):
+            team["id"] = "team-" + uuid.uuid4().hex[:6]
+        check_id(team["id"], "team id")
+        if not isinstance(team.get("name"), str) or not team["name"].strip():
+            raise ArenaError("team name is required")
+        team["name"] = team["name"].strip()
+        for key in ("target", "attacker"):
+            if team.get(key):
+                check_id(team[key], f"team {key}")
+        # Multi-machine teams: one to three service hosts and attackers.
+        for key in ("services", "attackers"):
+            value = team.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, list):
+                raise ArenaError(f"team {key} must be a list")
+            for host_id in value:
+                check_id(host_id, f"team {key} host")
+        if team.get("verified") is not None and not isinstance(team["verified"], bool):
+            raise ArenaError("team verified must be a boolean")
+        clean_teams.append(team)
+    event["teams"] = clean_teams
+    hosts = event.get("hosts") or []
+    if not isinstance(hosts, list):
+        raise ArenaError("event hosts must be a list")
+    for host_id in hosts:
+        check_id(host_id, "event host id")
+    event["hosts"] = hosts
+    event["observer"] = bool(event.get("observer", True))
+    event["agents"] = bool(event.get("agents", True))
+    if not event.get("invite"):
+        event["invite"] = "".join(secrets.choice(INVITE_ALPHABET) for _ in range(6))
+    event.setdefault("created_at", now())
+    event.setdefault("started_at", None)
+    event.setdefault("ended_at", None)
+    return event
+
+
+def events_list() -> dict:
+    items = registry_load("events")
+    return {"ok": True, "events": items, "count": len(items)}
+
+
+def events_create(raw: dict) -> dict:
+    event = normalize_event(raw)
+    items = registry_load("events")
+    if any(e.get("id") == event["id"] for e in items):
+        raise ArenaError(f"event already exists: {event['id']}")
+    items.append(event)
+    registry_save("events", items)
+    return {"ok": True, "event": event, "count": len(items)}
+
+
+def events_remove(event_id: str) -> dict:
+    check_id(event_id, "event id")
+    items = registry_load("events")
+    remaining = [e for e in items if e.get("id") != event_id]
+    if len(remaining) == len(items):
+        raise ArenaError(f"unknown event: {event_id}")
+    event = next(e for e in items if e.get("id") == event_id)
+    # Clean the machines first.  If that fails, keep the event so the operator
+    # can retry; dropping the event first would strand containers and ports
+    # with no way to reference them again.
+    if event.get("awd") or awd_meta_file(event_id).is_file():
+        cleanup = awd_cleanup_event(event_id)
+        if not cleanup.get("ok", True):
+            detail = "; ".join(f"{e['container']}: {e['error']}" for e in cleanup["errors"][:3])
+            raise ArenaError(f"AWD containers could not be removed; event kept for retry: {detail}")
+    else:
+        cleanup = {"containers": [], "hosts_removed": 0}
+    registry_save("events", remaining)
+    # Heartbeats for a deleted event are meaningless; drop them with it.
+    shutil.rmtree(AGENTS_DIR / event_id, ignore_errors=True)
+    return {"ok": True, "id": event_id, "removed": True, "count": len(remaining),
+            "containers": cleanup.get("containers", []),
+            "hosts_removed": cleanup.get("hosts_removed", 0)}
+
+
+def event_host_ids(event: dict) -> list:
+    ids = list(event.get("hosts") or [])
+    for team in event.get("teams") or []:
+        for key in ("target", "attacker"):
+            if team.get(key):
+                ids.append(team[key])
+        for key in ("services", "attackers"):
+            for host_id in team.get(key) or []:
+                ids.append(host_id)
+    return list(dict.fromkeys(ids))
+
+
+def event_probes(event: dict) -> dict:
+    probes = {}
+    for host_id in event_host_ids(event):
+        try:
+            probes[host_id] = probe_host(find_host(host_id))
+        except ArenaError as exc:
+            probes[host_id] = {
+                "ok": False, "host_id": host_id, "online": False,
+                "reachable": False, "ssh_ok": None, "docker_ok": None,
+                "latency_ms": None, "best_port": None,
+                "checked_from": "arena", "detail": str(exc), "error": str(exc),
+            }
+    return probes
+
+
+def agent_heartbeats(event_id: str) -> list:
+    directory = AGENTS_DIR / event_id
+    if not directory.is_dir():
+        return []
+    out = []
+    for path in sorted(directory.glob("*.json")):
+        data = load_json(path)
+        if not isinstance(data, dict):
+            continue
+        data.setdefault("host_id", path.stem)
+        age = None
+        seen = data.get("seen")
+        if isinstance(seen, str):
+            try:
+                age = int(time.time() - datetime.fromisoformat(seen).timestamp())
+            except (ValueError, TypeError, OverflowError):
+                age = None
+        data["age_seconds"] = age
+        data["fresh"] = age is not None and age <= 30
+        out.append(data)
+    return out
+
+
+def agent_activities(event_id: str, limit: int = 60) -> list:
+    """Recent agent observations for an event, newest first.
+
+    Agents may attach an `activity` (or `activities`) object to their
+    heartbeat.  That is how the console shows agents probing and attacking
+    each other without the participants' tooling living in this repository.
+    """
+    path = AGENTS_DIR / event_id / "activities.jsonl"
+    if not path.is_file():
+        return []
+    out = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(item, dict):
+                out.append(item)
+    except OSError:
+        return []
+    out.sort(key=lambda a: str(a.get("received_at") or a.get("at") or ""),
+             reverse=True)
+    return out[:limit]
+
+
+def record_activities(event_id: str, host_id: str, raw: dict) -> list:
+    directory = AGENTS_DIR / event_id
+    items = raw.get("activities")
+    if items is None and "activity" in raw:
+        items = [raw.get("activity")]
+    if not isinstance(items, list):
+        return []
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "activities.jsonl"
+    recorded = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("summary") or item.get("message") or "").strip()
+        if not summary:
+            continue
+        entry = {
+            "host_id": host_id,
+            "kind": str(item.get("kind") or item.get("type") or "activity")[:40],
+            "summary": summary[:300],
+            "target": (str(item.get("target"))[:120]
+                       if item.get("target") is not None else None),
+            "detail": (str(item.get("detail"))[:500]
+                       if item.get("detail") is not None else None),
+            "at": item.get("at") or now(),
+            "received_at": now(),
+        }
+        recorded.append(entry)
+    if not recorded:
+        return []
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            for entry in recorded:
+                fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > 300:
+            write_text_atomic(path, "\n".join(lines[-300:]) + "\n")
+    except OSError:
+        pass
+    return recorded
+
+
+def events_start(event_id: str) -> dict:
+    check_id(event_id, "event id")
+    items = registry_load("events")
+    event = next((e for e in items if e.get("id") == event_id), None)
+    if event is None:
+        raise ArenaError(f"unknown event: {event_id}")
+    event["status"] = "running"
+    event["started_at"] = event.get("started_at") or now()
+    event["ended_at"] = None
+    registry_save("events", items)
+    return {"ok": True, "event": event, "probes": event_probes(event),
+            "status": "running"}
+
+
+def events_stop(event_id: str) -> dict:
+    check_id(event_id, "event id")
+    items = registry_load("events")
+    event = next((e for e in items if e.get("id") == event_id), None)
+    if event is None:
+        raise ArenaError(f"unknown event: {event_id}")
+    event["status"] = "ended"
+    event["ended_at"] = now()
+    registry_save("events", items)
+    return {"ok": True, "event": event, "status": "ended"}
+
+
+def events_status(event_id: str) -> dict:
+    check_id(event_id, "event id")
+    event = next((e for e in registry_load("events") if e.get("id") == event_id), None)
+    if event is None:
+        raise ArenaError(f"unknown event: {event_id}")
+    probes = event_probes(event)
+    agents = agent_heartbeats(event_id)
+    by_host = {a.get("host_id"): a for a in agents}
+    teams = []
+    for team in event.get("teams") or []:
+        teams.append({
+            **team,
+            "target_status": probes.get(team.get("target")),
+            "attacker_status": probes.get(team.get("attacker")),
+        })
+    hosts = []
+    for host_id, probe in probes.items():
+        hosts.append({**probe, "agent": by_host.get(host_id)})
+    return {
+        "ok": True,
+        "event": event,
+        "probes": probes,
+        "teams": teams,
+        "hosts": hosts,
+        "agents": agents,
+        "activities": agent_activities(event_id),
+        "summary": {
+            "hosts": len(probes),
+            "online": sum(1 for p in probes.values() if p.get("online")),
+            "agents": len(agents),
+            "agents_fresh": sum(1 for a in agents if a.get("fresh")),
+        },
+    }
+
+
+def events_invite(event_id: str) -> dict:
+    check_id(event_id, "event id")
+    event = next((e for e in registry_load("events") if e.get("id") == event_id), None)
+    if event is None:
+        raise ArenaError(f"unknown event: {event_id}")
+
+    def brief(host_id):
+        if not host_id:
+            return None
+        try:
+            host = find_host(host_id)
+        except ArenaError:
+            return {"id": host_id, "unknown": True}
+        # Deliberately omit ssh/docker configs: invite data is shareable.
+        return {"id": host.get("id"), "name": host.get("name"),
+                "role": host.get("role"), "address": host.get("address"),
+                "ports": host.get("ports") or []}
+
+    teams = []
+    for team in event.get("teams") or []:
+        teams.append({"id": team.get("id"), "name": team.get("name"),
+                      "target": brief(team.get("target")),
+                      "attacker": brief(team.get("attacker")),
+                      "services": [brief(h) for h in team.get("services", [])],
+                      "attackers": [brief(h) for h in team.get("attackers", [])]})
+    notes = []
+    for host_id in event_host_ids(event):
+        try:
+            note = find_host(host_id).get("notes")
+        except ArenaError:
+            note = None
+        if note:
+            notes.append(note)
+    return {"ok": True, "invite": {
+        "id": event.get("id"),
+        "name": event.get("name"),
+        "format": event.get("format"),
+        "status": event.get("status"),
+        "invite": event.get("invite"),
+        "observer": event.get("observer"),
+        "created_at": event.get("created_at"),
+        "started_at": event.get("started_at"),
+        "teams": teams,
+        "notes": notes,
+        "access_note": "地址按 Arena 服务器视角提供。Mac 请通过已授权的 SSH 通道接入；Mac 本机转发地址不能分享给其他电脑。",
+    }}
+
+
+def events_agent_report(event_id: str, host_id: str, raw: dict) -> dict:
+    check_id(event_id, "event id")
+    check_id(host_id, "host id")
+    if not any(e.get("id") == event_id for e in registry_load("events")):
+        raise ArenaError(f"unknown event: {event_id}")
+    if not isinstance(raw, dict):
+        raise ArenaError("agent report must be a JSON object")
+    path = AGENTS_DIR / event_id / f"{host_id}.json"
+    beat = load_json(path, {}) or {}
+    if not isinstance(beat, dict):
+        beat = {}
+    beat.update(raw)
+    beat["event_id"] = event_id
+    beat["host_id"] = host_id
+    beat.setdefault("seen", now())
+    beat["received_at"] = now()
+    recorded = record_activities(event_id, host_id, raw)
+    write_json(path, beat)
+    return {"ok": True, "heartbeat": beat, "activities": recorded}
+
+
+# ---------------------------------------------------------------------------
+# AWD arena: self-contained multi-team service/attacker containers
+# ---------------------------------------------------------------------------
+
+AWD_DIR = PLATFORM / "awd"
+AWD_SERVICE_IMAGE = "vulnerables/web-dvwa:latest"
+AWD_ATTACKER_IMAGE = "arena-attackbox-attackbox:latest"
+AWD_PORT_FIRST = 19200
+AWD_PORT_LAST = 19999
+AWD_MAX_TEAMS = 5
+AWD_MAX_ROLE = 3
+AWD_SERVICE_MEM_MB = 1536
+AWD_SERVICE_CPUS = 1.5
+AWD_ATTACKER_MEM_MB = 2048
+AWD_ATTACKER_CPUS = 1.5
+
+
+def awd_meta_file(event_id: str) -> Path:
+    return AWD_DIR / f"{event_id}.json"
+
+
+def awd_load_event(event_id: str) -> dict:
+    for event in registry_load("events"):
+        if event.get("id") == event_id:
+            return event
+    raise ArenaError(f"unknown event: {event_id}")
+
+
+def awd_port_free(port: int, used: set) -> bool:
+    if port in used:
+        return False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def awd_allocate_port(used: set) -> int:
+    for port in range(AWD_PORT_FIRST, AWD_PORT_LAST + 1):
+        if awd_port_free(port, used):
+            used.add(port)
+            return port
+    raise ArenaError("no free port left for AWD services")
+
+
+def awd_container_name(event_id: str, team_id: str, kind: str, index: int) -> str:
+    tag = event_id[2:] if event_id.startswith("e-") else event_id
+    letter = "s" if kind == "service" else "a"
+    # Every machine this control plane creates is recognisable by its Arena
+    # prefix, exactly like the host display names ("Arena 队 1 服务机 S1").
+    return f"Arena-awd-{tag}-{team_id}-{letter}{index}"
+
+
+def awd_host_id(event_id: str, team_id: str, kind: str, index: int) -> str:
+    tag = event_id[2:] if event_id.startswith("e-") else event_id
+    letter = "s" if kind == "service" else "a"
+    return f"awd-{tag}-{team_id}-{letter}{index}"
+
+
+def awd_create(raw: dict) -> dict:
+    """Provision the hosts and event for an AWD arena, without starting it."""
+    if not isinstance(raw, dict):
+        raise ArenaError("payload must be a JSON object")
+    name = str(raw.get("name") or "").strip()
+    if not name:
+        raise ArenaError("AWD arena name is required")
+    try:
+        team_count = int(raw.get("teams", 1))
+        service_count = int(raw.get("services", 1))
+        attacker_count = int(raw.get("attackers", 1))
+    except (TypeError, ValueError):
+        raise ArenaError("teams/services/attackers must be integers")
+    if not 1 <= team_count <= AWD_MAX_TEAMS:
+        raise ArenaError(f"teams must be between 1 and {AWD_MAX_TEAMS}")
+    if not 1 <= service_count <= AWD_MAX_ROLE:
+        raise ArenaError(f"services must be between 1 and {AWD_MAX_ROLE}")
+    if not 1 <= attacker_count <= AWD_MAX_ROLE:
+        raise ArenaError(f"attackers must be between 1 and {AWD_MAX_ROLE}")
+    for image in (AWD_SERVICE_IMAGE, AWD_ATTACKER_IMAGE):
+        proc = docker("image", "inspect", image, timeout=20)
+        if proc.returncode != 0:
+            raise ArenaError(f"missing image: {image}")
+
+    event_id = new_id("e")
+    used_ports = set()
+    for host in registry_load("hosts"):
+        for port in host.get("ports") or []:
+            if isinstance(port, int):
+                used_ports.add(port)
+
+    teams, hosts = [], []
+    for team_index in range(1, team_count + 1):
+        team_id = f"t{team_index}"
+        service_hosts, attacker_hosts = [], []
+        for index in range(1, service_count + 1):
+            host_id = awd_host_id(event_id, team_id, "service", index)
+            port = awd_allocate_port(used_ports)
+            box = awd_container_name(event_id, team_id, "service", index)
+            host = normalize_host({
+                "id": host_id,
+                "name": f"Arena 队 {team_index} 服务机 S{index}",
+                "role": "target",
+                "address": "127.0.0.1",
+                "ports": [port],
+                "tags": ["awd", f"event:{event_id}", f"team:{team_id}", "service"],
+                "notes": f"{name} · 队 {team_index} · 服务机 S{index}（Web 靶标）",
+                "source": "deployed",
+                "docker": {"container": box, "host": None},
+                "awd": {"event": event_id, "team": team_id, "kind": "service",
+                        "index": index, "port": port, "container": box},
+            })
+            hosts.append(host)
+            service_hosts.append(host_id)
+        for index in range(1, attacker_count + 1):
+            host_id = awd_host_id(event_id, team_id, "attacker", index)
+            box = awd_container_name(event_id, team_id, "attacker", index)
+            host = normalize_host({
+                "id": host_id,
+                "name": f"Arena 队 {team_index} 攻击机 A{index}",
+                "role": "attacker",
+                "address": "127.0.0.1",
+                "ports": [],
+                "tags": ["awd", f"event:{event_id}", f"team:{team_id}", "attacker"],
+                "notes": f"{name} · 队 {team_index} · 攻击机 A{index}（Kali 工作台）",
+                "source": "deployed",
+                "docker": {"container": box, "host": None},
+                "awd": {"event": event_id, "team": team_id, "kind": "attacker",
+                        "index": index, "container": box},
+            })
+            hosts.append(host)
+            attacker_hosts.append(host_id)
+        teams.append({
+            "id": team_id,
+            "name": f"队 {team_index}",
+            "target": service_hosts[0],
+            "attacker": attacker_hosts[0],
+            "services": service_hosts,
+            "attackers": attacker_hosts,
+            "verified": False,
+            "verified_at": None,
+            "verified_detail": None,
+        })
+
+    event = normalize_event({
+        "id": event_id,
+        "name": name,
+        "format": "awd",
+        "status": "draft",
+        "teams": teams,
+        "hosts": [host["id"] for host in hosts],
+        "observer": True,
+        "agents": True,
+        "awd": True,
+    })
+
+    # Persist hosts first, then the event.  Both files are replaced atomically;
+    # the caller holds the exclusive lock.
+    new_ids = {host["id"] for host in hosts}
+    registry_save("hosts", registry_load("hosts") + hosts)
+    try:
+        events_create(event)
+        write_json(awd_meta_file(event_id), {
+            "event_id": event_id,
+            "name": name,
+            "teams": team_count,
+            "services": service_count,
+            "attackers": attacker_count,
+            "images": {"service": AWD_SERVICE_IMAGE,
+                       "attacker": AWD_ATTACKER_IMAGE},
+            "created_at": now(),
+        })
+    except Exception:
+        # Never strand port-reserving host records without their event; the
+        # caller has no event id to clean up with.
+        shutil.rmtree(AWD_DIR / event_id, ignore_errors=True)
+        registry_save("hosts", [h for h in registry_load("hosts")
+                                if h.get("id") not in new_ids])
+        raise
+    return {"ok": True, "event": event, "hosts": hosts,
+            "count": len(hosts), "teams": len(teams)}
+
+
+def awd_resolve_teams(event: dict, team_ids) -> list:
+    teams = event.get("teams") or []
+    wanted = []
+    if isinstance(team_ids, str):
+        wanted = [t for t in re.split(r"[,\s]+", team_ids) if t]
+    elif isinstance(team_ids, (list, tuple)):
+        wanted = [str(t) for t in team_ids if str(t).strip()]
+    if not wanted:
+        return teams
+    by_id = {team.get("id"): team for team in teams}
+    missing = [t for t in wanted if t not in by_id]
+    if missing:
+        raise ArenaError("unknown team: " + ", ".join(missing))
+    return [by_id[t] for t in dict.fromkeys(wanted)]
+
+
+def awd_state(container: str):
+    if not container:
+        return None
+    proc = docker("inspect", "-f", "{{.State.Status}}", container, timeout=15)
+    if proc.returncode == 0:
+        return (proc.stdout or "").strip() or None
+    detail = (proc.stderr or proc.stdout or "").strip()
+    # Only a truly absent container means "not running".  A daemon error or a
+    # permission problem must not be read as absence, or start would recreate
+    # (and verify would condemn) machines that are actually fine.
+    lowered = detail.lower()
+    if "no such object" in lowered or "no such container" in lowered or "not found" in lowered:
+        return None
+    raise ArenaError(f"cannot inspect {container}: {detail[-200:]}")
+
+
+def awd_host_record(host_id: str):
+    try:
+        return find_host(host_id)
+    except ArenaError:
+        return None
+
+
+def awd_run_container(event: dict, team: dict, host: dict) -> dict:
+    info = host.get("awd") or {}
+    kind = info.get("kind")
+    box = info.get("container") or (host.get("docker") or {}).get("container")
+    if not box:
+        raise ArenaError(f"host has no container: {host.get('id')}")
+    state = awd_state(box)
+    if state == "running":
+        return {"container": box, "action": "already-running"}
+    if state is not None:
+        proc = docker("start", box, timeout=90)
+        if proc.returncode != 0:
+            raise ArenaError((proc.stderr or proc.stdout).strip()[-400:])
+        return {"container": box, "action": "started"}
+    # A stale container with the same name but no metadata would fight the
+    # name; remove it before creating the managed one.
+    docker("rm", "-f", box, timeout=30)
+    labels = [
+        "--label", "arena.managed=true",
+        "--label", f"arena.awd.event={event['id']}",
+        "--label", f"arena.awd.team={team['id']}",
+        "--label", f"arena.awd.host={host['id']}",
+        "--label", f"arena.awd.kind={kind}",
+    ]
+    if kind == "service":
+        port = info.get("port") or (host.get("ports") or [0])[0]
+        args = ["run", "-d", "--name", box, "--hostname", box.lower(),
+                *labels,
+                "-p", f"127.0.0.1:{int(port)}:80",
+                "--memory", f"{AWD_SERVICE_MEM_MB}m",
+                "--cpus", str(AWD_SERVICE_CPUS),
+                "--restart", "no",
+                AWD_SERVICE_IMAGE]
+    else:
+        workspace = AWD_DIR / event["id"] / team["id"] / "workspace"
+        workspace.mkdir(parents=True, exist_ok=True)
+        args = ["run", "-d", "--name", box, "--hostname", box.lower(),
+                "--network", "host",
+                *labels,
+                "--cap-add", "NET_ADMIN", "--cap-add", "NET_RAW",
+                "-v", f"{SHARED}:/shared:ro",
+                "-v", f"{workspace}:/workspace",
+                "--memory", f"{AWD_ATTACKER_MEM_MB}m",
+                "--cpus", str(AWD_ATTACKER_CPUS),
+                "--restart", "no",
+                AWD_ATTACKER_IMAGE, "sleep", "infinity"]
+    proc = docker(*args, timeout=180)
+    if proc.returncode != 0:
+        raise ArenaError((proc.stderr or proc.stdout).strip()[-500:])
+    return {"container": box, "action": "created"}
+
+
+def awd_start(event_id: str, team_ids=None) -> dict:
+    event = awd_load_event(event_id)
+    teams = awd_resolve_teams(event, team_ids)
+    if not event.get("awd"):
+        raise ArenaError("event is not an Arena-managed AWD arena")
+    started, errors = [], []
+    try:
+        for team in teams:
+            host_ids = list(team.get("services") or []) + list(team.get("attackers") or [])
+            for host_id in host_ids:
+                host = awd_host_record(host_id)
+                if not host:
+                    errors.append({"host": host_id, "error": "host missing"})
+                    continue
+                try:
+                    started.append({"team": team["id"], "host": host_id,
+                                    **awd_run_container(event, team, host)})
+                except ArenaError as exc:
+                    errors.append({"host": host_id, "error": str(exc)})
+    finally:
+        # Persist whatever happened, even when Docker made the whole loop slow
+        # or raised: a half-started arena must still be visible as running.
+        if started:
+            event["status"] = "running"
+            event["started_at"] = event.get("started_at") or now()
+        events = registry_load("events")
+        for index, item in enumerate(events):
+            if item.get("id") == event_id:
+                events[index] = event
+        registry_save("events", events)
+    return {"ok": not errors, "event": event, "started": started,
+            "errors": errors, "teams": [t["id"] for t in teams]}
+
+
+def awd_stop(event_id: str, team_ids=None) -> dict:
+    event = awd_load_event(event_id)
+    teams = awd_resolve_teams(event, team_ids)
+    stopped, errors = [], []
+    try:
+        for team in teams:
+            host_ids = list(team.get("services") or []) + list(team.get("attackers") or [])
+            for host_id in host_ids:
+                host = awd_host_record(host_id)
+                box = ((host or {}).get("awd") or {}).get("container")
+                if not box:
+                    continue
+                try:
+                    proc = docker("stop", "-t", "3", box, timeout=60)
+                except ArenaError as exc:
+                    errors.append({"host": host_id, "error": str(exc)})
+                    continue
+                if proc.returncode == 0:
+                    stopped.append(box)
+                else:
+                    detail = (proc.stderr or proc.stdout).strip()[-200:]
+                    if "no such container" not in detail.lower():
+                        errors.append({"host": host_id, "error": detail})
+    finally:
+        # A paused arena still keeps its verified result; it just is not running.
+        still_running = False
+        for team in event.get("teams") or []:
+            for host_id in list(team.get("services") or []) + list(team.get("attackers") or []):
+                host = awd_host_record(host_id)
+                box = ((host or {}).get("awd") or {}).get("container")
+                if not box:
+                    continue
+                try:
+                    if awd_state(box) == "running":
+                        still_running = True
+                        break
+                except ArenaError as exc:
+                    # Cannot tell; keep the safer "running" status.
+                    still_running = True
+                    errors.append({"host": host_id, "error": str(exc)})
+                    break
+            if still_running:
+                break
+        event["status"] = "running" if still_running else "paused"
+        events = registry_load("events")
+        for index, item in enumerate(events):
+            if item.get("id") == event_id:
+                events[index] = event
+        registry_save("events", events)
+    return {"ok": not errors, "event": event, "stopped": stopped,
+            "errors": errors, "teams": [t["id"] for t in teams]}
+
+
+def awd_http_code(port: int, timeout: float = 2.0):
+    if not port:
+        return None
+    try:
+        proc = run(["curl", "-sS", "--max-time", str(timeout), "-o", "/dev/null",
+                    "-w", "%{http_code}", f"http://127.0.0.1:{int(port)}/"],
+                   timeout=timeout + 4)
+    except (ArenaError, OSError):
+        return None
+    raw = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not raw.isdigit():
+        return None
+    code = int(raw)
+    return code or None
+
+
+def awd_check_service(host: dict, wait_seconds: float = 0.0) -> dict:
+    info = host.get("awd") or {}
+    box = info.get("container") or (host.get("docker") or {}).get("container")
+    port = info.get("port") or (host.get("ports") or [None])[0]
+    code = None
+    deadline = time.monotonic() + max(0.0, wait_seconds)
+    # Re-inspect on every pass: right after start a container can be created or
+    # restarting for a moment, and that must not be mistaken for "stopped".
+    while True:
+        state = awd_state(box)
+        if state == "running" and port:
+            code = awd_http_code(int(port))
+        transient = state in ("running", "created", "restarting", "paused")
+        if code is not None or not transient or time.monotonic() >= deadline:
+            break
+        time.sleep(1.5)
+    ok = code is not None and 200 <= code < 400
+    return {"host_id": host.get("id"), "container": box, "state": state,
+            "http_ok": ok, "http_status": code, "port": port}
+
+
+def awd_attacker_reach(host: dict, ports: list) -> dict:
+    info = host.get("awd") or {}
+    box = info.get("container") or (host.get("docker") or {}).get("container")
+    state = awd_state(box)
+    reachable = 0
+    tried = []
+    if state == "running" and box:
+        for port in ports[:3]:
+            command = ["exec", box, "curl", "-sS", "--max-time", "3",
+                       "-o", "/dev/null", "-w", "%{http_code}",
+                       f"http://127.0.0.1:{int(port)}/"]
+            try:
+                proc = docker(*command, timeout=12)
+            except (ArenaError, OSError):
+                break
+            raw = (proc.stdout or "").strip()
+            reachable_this = proc.returncode == 0 and raw.isdigit() and int(raw) > 0
+            if reachable_this:
+                reachable += 1
+            tried.append({"port": port, "ok": reachable_this})
+    return {"host_id": host.get("id"), "container": box, "state": state,
+            "http_ok": reachable > 0, "http_status": None, "port": None,
+            "reachable": reachable, "tried": tried}
+
+
+def awd_verify_team(event: dict, team: dict) -> dict:
+    service_hosts = [awd_host_record(h) for h in (team.get("services") or [])]
+    attacker_hosts = [awd_host_record(h) for h in (team.get("attackers") or [])]
+    service_hosts = [h for h in service_hosts if h]
+    attacker_hosts = [h for h in attacker_hosts if h]
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=max(1, min(6, len(service_hosts)))) as pool:
+        services = list(pool.map(lambda h: awd_check_service(h, 45.0), service_hosts))
+    ports = [s["port"] for s in services if s.get("port")]
+    attackers = [awd_attacker_reach(h, ports) for h in attacker_hosts]
+    service_ok = bool(services) and all(s["http_ok"] for s in services)
+    attacker_ok = bool(attackers) and all(
+        a["state"] == "running" and a.get("reachable", 0) > 0 for a in attackers)
+    ok = service_ok and attacker_ok
+    parts = []
+    for index, item in enumerate(services, 1):
+        parts.append(f"服务 S{index} HTTP {item['http_status'] or '不可达'}")
+    for index, item in enumerate(attackers, 1):
+        parts.append(f"攻击机 A{index} 连通 {item.get('reachable', 0)}/{len(ports)}")
+    detail = " · ".join(parts)
+    if not service_ok:
+        detail = "服务未就绪 · " + detail
+    if not attacker_ok:
+        detail += " · 攻击机未就绪"
+    result = {
+        "team_id": team["id"],
+        "ok": ok,
+        "detail": detail[:400],
+        "services": services,
+        "attackers": attackers,
+        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "untested": not any(s.get("state") == "running" for s in services)
+                    and not any(a.get("state") == "running" for a in attackers),
+    }
+    return result
+
+
+def awd_verify(event_id: str, team_ids=None) -> dict:
+    # The whole probe-and-record sequence runs under the lock: verifying while
+    # a start/stop/delete is in flight would otherwise stamp a verdict onto
+    # machines that are half-created or already gone.
+    with lock():
+        event = awd_load_event(event_id)
+        if not event.get("awd"):
+            raise ArenaError("event is not an Arena-managed AWD arena")
+        teams = awd_resolve_teams(event, team_ids)
+        with ThreadPoolExecutor(max_workers=max(1, min(3, len(teams)))) as pool:
+            results = list(pool.map(lambda t: awd_verify_team(event, t), teams))
+        by_id = {r["team_id"]: r for r in results}
+        events = registry_load("events")
+        found = False
+        for index, item in enumerate(events):
+            if item.get("id") != event_id:
+                continue
+            found = True
+            for team in item.get("teams") or []:
+                result = by_id.get(team.get("id"))
+                if not result:
+                    continue
+                if result.get("untested"):
+                    # A stopped team has no live signal.  Keep the last real
+                    # verdict instead of erasing a successful test run.
+                    result["detail"] = "未启动 · 保留上次验证结果"
+                    result["ok"] = False
+                    continue
+                team["verified"] = bool(result["ok"])
+                team["verified_at"] = now() if result["ok"] else None
+                team["verified_detail"] = result["detail"]
+                team["services_status"] = result["services"]
+                team["attackers_status"] = result["attackers"]
+            events[index] = item
+            event = item
+            break
+        if not found:
+            raise ArenaError(f"event disappeared during verify: {event_id}")
+        registry_save("events", events)
+    return {"ok": True, "results": results, "event": event}
+
+
+def awd_status(event_id: str) -> dict:
+    event = awd_load_event(event_id)
+    teams = event.get("teams") or []
+    out = []
+
+    def team_status(team):
+        service_hosts = [awd_host_record(h) for h in (team.get("services") or [])]
+        attacker_hosts = [awd_host_record(h) for h in (team.get("attackers") or [])]
+        service_hosts = [h for h in service_hosts if h]
+        attacker_hosts = [h for h in attacker_hosts if h]
+        services = []
+        for host in service_hosts:
+            info = host.get("awd") or {}
+            port = info.get("port") or (host.get("ports") or [None])[0]
+            state = awd_state(info.get("container"))
+            code = awd_http_code(port) if state == "running" and port else None
+            services.append({"host_id": host["id"],
+                             "container": info.get("container"),
+                             "state": state, "http_ok": code is not None
+                             and 200 <= code < 400,
+                             "http_status": code, "port": port})
+        attackers = []
+        for host in attacker_hosts:
+            info = host.get("awd") or {}
+            state = awd_state(info.get("container"))
+            attackers.append({"host_id": host["id"],
+                              "container": info.get("container"),
+                              "state": state, "http_ok": None,
+                              "http_status": None, "port": None})
+        running = bool(services) and all(s["state"] == "running" for s in services) \
+            and all(a["state"] == "running" for a in attackers)
+        ready = running and all(bool(s["http_ok"]) for s in services)
+        return {"id": team.get("id"), "name": team.get("name"),
+                "running": running, "ready": ready,
+                "verified": bool(team.get("verified")),
+                "verified_at": team.get("verified_at"),
+                "verified_detail": team.get("verified_detail"),
+                "services": services, "attackers": attackers}
+
+    with ThreadPoolExecutor(max_workers=min(5, max(1, len(teams)))) as pool:
+        out = list(pool.map(team_status, teams))
+    return {"ok": True, "event_id": event_id, "teams": out,
+            "event": event}
+
+
+def awd_cleanup_event(event_id: str) -> dict:
+    """Remove every container and host record belonging to an AWD event."""
+    items = registry_load("hosts")
+    ours = [h for h in items
+            if isinstance(h.get("awd"), dict) and h["awd"].get("event") == event_id]
+    proc = docker("ps", "-a", "--filter", f"label=arena.awd.event={event_id}",
+                  "--format", "{{.Names}}", timeout=30)
+    names = [n.strip() for n in (proc.stdout or "").splitlines() if n.strip()]
+    # Labels are the primary source.  Host records are the fallback: if the
+    # daemon misses a label (or ps fails), the named container must still go,
+    # otherwise a re-created event could collide with a leftover machine.
+    for host in ours:
+        info = host.get("awd") or {}
+        box = info.get("container") or (host.get("docker") or {}).get("container")
+        if box and box not in names:
+            names.append(box)
+    removed = []
+    errors = []
+    for name in names:
+        try:
+            proc = docker("rm", "-f", name, timeout=45)
+            detail = (proc.stderr or proc.stdout or "").strip()
+        except (ArenaError, OSError) as exc:
+            proc, detail = None, str(exc)
+        if proc is not None and proc.returncode == 0:
+            removed.append(name)
+        elif "no such container" in detail.lower() or "no such object" in detail.lower():
+            # Already gone; the record can still be dropped.
+            removed.append(name)
+        else:
+            errors.append({"container": name, "error": detail[-300:] or "docker rm failed"})
+    removed_set = set(removed)
+    ours_ids = {x.get("id") for x in ours}
+    kept = []
+    for host in items:
+        if host.get("id") not in ours_ids:
+            kept.append(host)
+            continue
+        info = host.get("awd") or {}
+        box = info.get("container") or (host.get("docker") or {}).get("container")
+        # Keep the record when its container could not be confirmed gone, so a
+        # retry still knows which machines to clean and which ports to hold.
+        if box and box not in removed_set:
+            kept.append(host)
+    if len(kept) != len(items):
+        registry_save("hosts", kept)
+    if not errors:
+        shutil.rmtree(AWD_DIR / event_id, ignore_errors=True)
+        meta = awd_meta_file(event_id)
+        if meta.is_file():
+            try:
+                meta.unlink()
+            except OSError:
+                pass
+    return {"ok": not errors, "containers": removed,
+            "hosts_removed": len(items) - len(kept), "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Resource allocation: generated docker-compose.override.yml with limits
+# ---------------------------------------------------------------------------
+
+def compose_files(lab_dir: Path, meta: dict) -> list:
+    """Compose -f arguments, explicitly including the generated override.
+
+    arenactl always passes -f, which disables Compose's automatic override
+    discovery, so the override has to be named explicitly.
+    """
+    base = Path(lab_dir) / meta.get("compose", "docker-compose.yml")
+    args = ["-f", str(base)]
+    override = Path(lab_dir) / "docker-compose.override.yml"
+    if override.is_file():
+        args += ["-f", str(override)]
+    return args
+
+
+def ensure_override(lab_dir: Path, meta: dict) -> dict:
+    """Generate docker-compose.override.yml with mem/cpu limits if absent."""
+    lab_dir = Path(lab_dir)
+    base = lab_dir / meta.get("compose", "docker-compose.yml")
+    override = lab_dir / "docker-compose.override.yml"
+    if override.exists():
+        try:
+            existing = override.read_text(encoding="utf-8")
+        except OSError:
+            existing = ""
+        # Regenerate our own generated overrides when the lab allocation
+        # changed; never touch a hand-written override.
+        if not existing.startswith("# generated by arenactl"):
+            return {"written": False, "path": str(override),
+                    "detail": "custom override preserved"}
+    if not base.is_file():
+        return {"written": False, "detail": "compose file missing"}
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - PyYAML is provisioned on Arena
+        return {"written": False, "detail": "PyYAML unavailable"}
+    try:
+        doc = yaml.safe_load(base.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        return {"written": False, "detail": f"cannot parse compose: {exc}"}
+    services = doc.get("services") if isinstance(doc, dict) else None
+    if not isinstance(services, dict) or not services:
+        return {"written": False, "detail": "no services found"}
+    try:
+        mem = int(meta.get("mem_mb", meta.get("ram_mb", 3072)))
+    except (TypeError, ValueError):
+        mem = 3072
+    try:
+        cpus = float(meta.get("cpu", 2.5))
+    except (TypeError, ValueError):
+        cpus = 2.5
+    limits = {name: {"mem_limit": f"{mem}m", "cpus": cpus} for name in services}
+    dumped = yaml.safe_dump({"services": limits}, sort_keys=False,
+                            allow_unicode=True)
+    # Match the documented form: mem_limit is a quoted string, cpus a float.
+    dumped = re.sub(r"(?m)^(\s*mem_limit: )(\S+)$", r'\1"\2"', dumped)
+    text = "# generated by arenactl\n" + dumped
+    write_text_atomic(override, text)
+    return {"written": True, "path": str(override), "services": len(limits),
+            "mem_limit": f"{mem}m", "cpus": cpus}
+
+
+def main() -> int:
+    # JSON is always the output format; accept --json anywhere for client
+    # convenience (the Mac app passes it explicitly).
+    argv = [a for a in sys.argv if a != "--json"]
+    parser = argparse.ArgumentParser(prog="arenactl")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("list")
+    sub.add_parser("info")
+    sub.add_parser("library")
+    p = sub.add_parser("install")
+    p.add_argument("id")
+    p.add_argument("--no-pull", action="store_true")
+    p = sub.add_parser("start")
+    p.add_argument("id")
+    p.add_argument("--allow-multiple", action="store_true")
+    p = sub.add_parser("stop")
+    p.add_argument("id")
+    p = sub.add_parser("remove")
+    p.add_argument("id")
+    p.add_argument("--keep-images", action="store_true")
+    sub.add_parser("stop-all")
+    p = sub.add_parser("logs")
+    p.add_argument("id")
+    p.add_argument("--tail", type=int, default=120)
+    p = sub.add_parser("attackbox")
+    p.add_argument("action", choices=["start", "stop", "status"])
+
+    # -- platform: hosts ---------------------------------------------------
+    p = sub.add_parser("hosts")
+    hsub = p.add_subparsers(dest="hosts_command", required=True)
+    hsub.add_parser("list")
+    p = hsub.add_parser("add")
+    p.add_argument("payload_arg", nargs="?", metavar="JSON")
+    p.add_argument("--data", "--payload", dest="payload_opt", metavar="JSON")
+    p = hsub.add_parser("update")
+    p.add_argument("payload_arg", nargs="?", metavar="JSON")
+    p.add_argument("--data", "--payload", dest="payload_opt", metavar="JSON")
+    p = hsub.add_parser("remove")
+    p.add_argument("id")
+    p = hsub.add_parser("probe")
+    p.add_argument("id")
+    hsub.add_parser("probe-all")
+    p = hsub.add_parser("import")
+    p.add_argument("path")
+    hsub.add_parser("export")
+
+    # -- platform: topologies ---------------------------------------------
+    p = sub.add_parser("topologies")
+    tsub = p.add_subparsers(dest="topologies_command", required=True)
+    tsub.add_parser("list")
+    p = tsub.add_parser("add")
+    p.add_argument("payload_arg", nargs="?", metavar="JSON")
+    p.add_argument("--data", "--payload", dest="payload_opt", metavar="JSON")
+    p = tsub.add_parser("remove")
+    p.add_argument("id")
+    p = tsub.add_parser("test")
+    p.add_argument("id")
+
+    # -- platform: events --------------------------------------------------
+    p = sub.add_parser("events")
+    esub = p.add_subparsers(dest="events_command", required=True)
+    esub.add_parser("list")
+    p = esub.add_parser("create")
+    p.add_argument("payload_arg", nargs="?", metavar="JSON")
+    p.add_argument("--data", "--payload", dest="payload_opt", metavar="JSON")
+    p = esub.add_parser("remove")
+    p.add_argument("id")
+    p = esub.add_parser("start")
+    p.add_argument("id")
+    p = esub.add_parser("stop")
+    p.add_argument("id")
+    p = esub.add_parser("status")
+    p.add_argument("id")
+    p = esub.add_parser("invite")
+    p.add_argument("id")
+    p = esub.add_parser("agent-report")
+    p.add_argument("event_id")
+    p.add_argument("host_id")
+    p.add_argument("payload_arg", nargs="?", metavar="JSON")
+    p.add_argument("--data", "--payload", dest="payload_opt", metavar="JSON")
+
+    # -- AWD arena ---------------------------------------------------------
+    p = sub.add_parser("awd")
+    asub = p.add_subparsers(dest="awd_command", required=True)
+    p = asub.add_parser("create")
+    p.add_argument("payload_arg", nargs="?", metavar="JSON")
+    p.add_argument("--data", "--payload", dest="payload_opt", metavar="JSON")
+    for name in ("start", "stop", "verify", "status", "remove"):
+        p = asub.add_parser(name)
+        p.add_argument("id")
+        if name in ("start", "stop", "verify"):
+            p.add_argument("--teams", default="", metavar="t1,t2")
+
+    args = parser.parse_args(argv[1:])
+
+    def payload() -> dict:
+        raw = getattr(args, "payload_arg", None)
+        if raw is None:
+            raw = getattr(args, "payload_opt", None)
+        return parse_payload(raw)
+
+    try:
+        if args.command == "list":
+            out = list_labs()
+        elif args.command == "info":
+            out = info()
+        elif args.command == "library":
+            out = library()
+        elif args.command == "install":
+            fh = lock()
+            out = {"ok": True, **install_lab(args.id, pull=not args.no_pull)}
+        elif args.command == "start":
+            fh = lock()
+            out = {"ok": True, **start_lab(args.id, exclusive=not args.allow_multiple)}
+        elif args.command == "stop":
+            fh = lock()
+            out = {"ok": True, **stop_lab(args.id)}
+        elif args.command == "remove":
+            fh = lock()
+            out = {"ok": True, **remove_lab(args.id, keep_images=args.keep_images)}
+        elif args.command == "stop-all":
+            fh = lock()
+            out = {"ok": True, "stopped": [stop_lab(x, quiet=True)["id"] for x in all_running()]}
+        elif args.command == "logs":
+            meta = lab_meta(args.id)
+            proc = docker("compose", "-p", project(args.id),
+                          *compose_files(LABS / args.id, meta),
+                          "logs", "--tail", str(args.tail), cwd=str(LABS / args.id), timeout=60)
+            out = {"ok": True, "logs": proc.stdout[-20000:]}
+        elif args.command == "attackbox":
+            fh = lock()
+            out = attackbox(args.action)
+        elif args.command == "hosts":
+            cmd = args.hosts_command
+            if cmd == "list":
+                out = hosts_list()
+            elif cmd == "add":
+                fh = lock()
+                out = hosts_add(payload())
+            elif cmd == "update":
+                fh = lock()
+                out = hosts_update(payload())
+            elif cmd == "remove":
+                fh = lock()
+                out = hosts_remove(args.id)
+            elif cmd == "probe":
+                out = hosts_probe(args.id)
+            elif cmd == "probe-all":
+                out = hosts_probe_all()
+            elif cmd == "import":
+                fh = lock()
+                out = hosts_import(args.path)
+            elif cmd == "export":
+                out = hosts_export()
+            else:  # pragma: no cover
+                raise ArenaError("unknown hosts command")
+        elif args.command == "topologies":
+            cmd = args.topologies_command
+            if cmd == "list":
+                out = topologies_list()
+            elif cmd == "add":
+                fh = lock()
+                out = topologies_add(payload())
+            elif cmd == "remove":
+                fh = lock()
+                out = topologies_remove(args.id)
+            elif cmd == "test":
+                fh = lock()
+                out = topology_test(args.id)
+            else:  # pragma: no cover
+                raise ArenaError("unknown topologies command")
+        elif args.command == "events":
+            cmd = args.events_command
+            if cmd == "list":
+                out = events_list()
+            elif cmd == "create":
+                fh = lock()
+                out = events_create(payload())
+            elif cmd == "remove":
+                fh = lock()
+                out = events_remove(args.id)
+            elif cmd == "start":
+                fh = lock()
+                out = events_start(args.id)
+            elif cmd == "stop":
+                fh = lock()
+                out = events_stop(args.id)
+            elif cmd == "status":
+                out = events_status(args.id)
+            elif cmd == "invite":
+                out = events_invite(args.id)
+            elif cmd == "agent-report":
+                fh = lock()
+                out = events_agent_report(args.event_id, args.host_id, payload())
+            else:  # pragma: no cover
+                raise ArenaError("unknown events command")
+        elif args.command == "awd":
+            cmd = args.awd_command
+            if cmd == "create":
+                fh = lock()
+                out = awd_create(payload())
+            elif cmd == "start":
+                fh = lock()
+                out = awd_start(args.id, args.teams)
+            elif cmd == "stop":
+                fh = lock()
+                out = awd_stop(args.id, args.teams)
+            elif cmd == "verify":
+                # awd_verify takes the lock itself once the network probes are
+                # complete, so a long probe never blocks status or stop.
+                out = awd_verify(args.id, args.teams)
+            elif cmd == "status":
+                out = awd_status(args.id)
+            elif cmd == "remove":
+                # Same contract as events remove: containers, host records and
+                # the event itself disappear together; a failed cleanup keeps
+                # the event so it can be retried.
+                fh = lock()
+                out = events_remove(args.id)
+            else:  # pragma: no cover
+                raise ArenaError("unknown awd command")
+        else:  # pragma: no cover
+            raise ArenaError("unknown command")
+    except ArenaError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        return 1
+    except subprocess.TimeoutExpired:
+        print(json.dumps({"ok": False, "error": "command timed out"}, ensure_ascii=False))
+        return 1
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

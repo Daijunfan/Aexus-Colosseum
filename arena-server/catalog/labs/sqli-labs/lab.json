@@ -1,0 +1,36 @@
+{
+  "source": "curated",
+  "difficulty": 2,
+  "tags": [
+    "SQL 注入",
+    "MySQL",
+    "盲注",
+    "堆叠注入"
+  ],
+  "mitre": [
+    "T1190"
+  ],
+  "access": [
+    {
+      "label": "SQLi-Labs",
+      "port": 8083,
+      "scheme": "http",
+      "path": "/"
+    }
+  ],
+  "credentials": "无",
+  "notes": "",
+  "cpu": 2.0,
+  "ram_mb": 2048,
+  "build": false,
+  "id": "sqli-labs",
+  "name": "SQLi-Labs",
+  "subtitle": "65 关 SQL 注入训练场",
+  "category": "web",
+  "summary": "从联合查询到布尔盲注、时间盲注、报错注入与 WAF 绕过的完整注入训练序列。",
+  "objectives": [
+    "完成 Less-1 至 Less-10 的基础注入",
+    "用 sqlmap 自动化完成 3 个盲注关卡",
+    "总结每种注入类型的判断与利用 payload"
+  ]
+}

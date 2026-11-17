@@ -1,0 +1,10 @@
+services:
+  caldera:
+    image: ghcr.io/mitre/caldera:latest
+    container_name: arena-caldera
+    ports:
+      - "8888:8888"
+      - "7010:7010"
+      - "7011:7011"
+    mem_limit: 4g
+    restart: unless-stopped

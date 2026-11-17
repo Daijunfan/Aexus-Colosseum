@@ -1,0 +1,53 @@
+{
+  "source": "curated",
+  "difficulty": 2,
+  "tags": [
+    "Linux",
+    "服务枚举",
+    "弱口令",
+    "vsftpd",
+    "Samba",
+    "提权"
+  ],
+  "mitre": [
+    "T1046",
+    "T1110",
+    "T1210",
+    "T1068"
+  ],
+  "access": [
+    {
+      "label": "Web (DVWA)",
+      "port": 8085,
+      "scheme": "http",
+      "path": "/"
+    },
+    {
+      "label": "Tomcat",
+      "port": 8086,
+      "scheme": "http",
+      "path": "/"
+    },
+    {
+      "label": "SSH",
+      "port": 8022,
+      "scheme": "ssh",
+      "path": ""
+    }
+  ],
+  "credentials": "msfadmin / msfadmin（系统）；root / toor",
+  "notes": "镜像同时开放 FTP(8021)、Telnet(8023)、MySQL(3307)、PostgreSQL(5433)。",
+  "cpu": 3.0,
+  "ram_mb": 4096,
+  "build": false,
+  "id": "metasploitable2",
+  "name": "Metasploitable 2",
+  "subtitle": "经典 Linux 渗透靶机",
+  "category": "network",
+  "summary": "安全圈最经典的 Linux 靶机之一，开放 FTP、SSH、Telnet、SMB、MySQL、Tomcat 等大量脆弱服务。",
+  "objectives": [
+    "完成全端口扫描与服务指纹识别",
+    "至少利用 3 个不同服务获取 shell",
+    "从普通用户提权到 root 并记录利用链"
+  ]
+}

@@ -1,0 +1,8 @@
+services:
+  sqli-labs:
+    image: acgpiano/sqli-labs:latest
+    container_name: arena-sqli-labs
+    ports:
+      - "8083:80"
+    mem_limit: 1g
+    restart: unless-stopped

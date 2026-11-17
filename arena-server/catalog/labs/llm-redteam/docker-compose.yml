@@ -1,0 +1,8 @@
+services:
+  llm-redteam:
+    build: .
+    container_name: arena-llm-redteam
+    ports:
+      - "8088:8088"
+    mem_limit: 2g
+    restart: unless-stopped

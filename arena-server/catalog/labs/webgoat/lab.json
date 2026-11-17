@@ -1,0 +1,36 @@
+{
+  "source": "curated",
+  "difficulty": 2,
+  "tags": [
+    "Java",
+    "OWASP",
+    "课程",
+    "注入",
+    "认证"
+  ],
+  "mitre": [
+    "T1190"
+  ],
+  "access": [
+    {
+      "label": "WebGoat",
+      "port": 8082,
+      "scheme": "http",
+      "path": "/WebGoat/"
+    }
+  ],
+  "credentials": "首次进入时自行注册",
+  "notes": "",
+  "cpu": 2.5,
+  "ram_mb": 4096,
+  "build": false,
+  "id": "webgoat",
+  "name": "OWASP WebGoat",
+  "subtitle": "交互式 Web 安全课程",
+  "category": "web",
+  "summary": "由 OWASP 维护的交互式教学平台，每关都有讲解、提示与实时判分，适合系统化补齐 Web 漏洞知识图谱。",
+  "objectives": [
+    "完成 Injection、Authentication、Access Control 三个章节",
+    "理解 Java 生态下的表达式注入与反序列化入口"
+  ]
+}

@@ -1,0 +1,8 @@
+services:
+  webgoat:
+    image: webgoat/webgoat:latest
+    container_name: arena-webgoat
+    ports:
+      - "8082:8080"
+    mem_limit: 3g
+    restart: unless-stopped

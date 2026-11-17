@@ -1,0 +1,40 @@
+{
+  "source": "curated",
+  "difficulty": 3,
+  "tags": [
+    "MITRE",
+    "ATT&CK",
+    "C2",
+    "自动化",
+    "对抗"
+  ],
+  "mitre": [
+    "T1059",
+    "T1053",
+    "T1071",
+    "T1105"
+  ],
+  "access": [
+    {
+      "label": "Caldera UI",
+      "port": 8888,
+      "scheme": "http",
+      "path": "/"
+    }
+  ],
+  "credentials": "admin / admin（首次登录后修改）",
+  "notes": "镜像来自 ghcr.io；agent 端口 7010/7011 仅在容器网络内使用。",
+  "cpu": 4.0,
+  "ram_mb": 6144,
+  "build": false,
+  "id": "caldera",
+  "name": "MITRE Caldera",
+  "subtitle": "自动化 adversary emulation",
+  "category": "redteam",
+  "summary": "MITRE 官方自动化对抗平台，用 ATT&CK 能力编排红队行动，并可与蓝队检测体系联动做紫队验证。",
+  "objectives": [
+    "部署 agent 并建立 C2 会话",
+    "运行一个包含发现、横向与持久化的 adversary 剖面",
+    "导出 ATT&CK 覆盖报告并对照检测规则"
+  ]
+}

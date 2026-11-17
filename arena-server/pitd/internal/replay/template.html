@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__PIT_PAGE_TITLE__ · Aexus Colosseum .pitreplay</title>
+<style>
+:root {
+  --bg: #f4f4f7;
+  --panel: #ffffff;
+  --border: rgba(0, 0, 0, 0.075);
+  --crimson: #dc2e33;
+  --cyan: #007aff;
+  --gold: #d1800a;
+  --emerald: #1c9457;
+  --text: #1a1a1e;
+  --muted: #61626a;
+}
+* { box-sizing: border-box; }
+button, input[type="range"], [onclick] { cursor: pointer !important; }
+body {
+  margin: 0;
+  background: linear-gradient(180deg, #ffffff 0%, #f4f4f7 280px);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", system-ui, sans-serif;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+.mono { font-family: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+header.topbar {
+  padding: 12px 20px;
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 20;
+}
+.title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.badge {
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.badge-crimson { background: rgba(0,122,255,0.10); color: var(--cyan); border: 1px solid rgba(0,122,255,0.22); }
+.badge-cyan { background: rgba(28,148,87,0.10); color: var(--emerald); border: 1px solid rgba(28,148,87,0.22); }
+.badge-gold { background: rgba(209,128,10,0.10); color: var(--gold); border: 1px solid rgba(209,128,10,0.24); }
+.lens-bar { display: flex; gap: 6px; align-items: center; }
+.btn {
+  background: #ffffff;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 13px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.btn:hover { border-color: var(--cyan); color: var(--cyan); }
+.btn.active { background: var(--cyan); border-color: var(--cyan); color: #ffffff; }
+.btn-visor.active { background: var(--cyan); border-color: var(--cyan); color: #ffffff; }
+
+.seats-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(195px, 1fr));
+  gap: 8px;
+}
+.seat-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 9px 12px;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.038);
+}
+.seat-card.king { border-color: var(--gold); box-shadow: 0 4px 14px rgba(209,128,10,0.15); }
+.seat-card.oom { border-color: rgba(220,46,51,0.45); }
+.seat-head { display: flex; justify-content: space-between; align-items: center; font-size: 12.5px; font-weight: 700; color: var(--text); }
+.seat-score { font-size: 14px; font-weight: 800; color: var(--text); }
+.bar-row { display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: 10.5px; color: var(--muted); }
+.mana-track { flex: 1; height: 6px; background: rgba(0,0,0,0.06); border-radius: 99px; overflow: hidden; }
+.mana-fill { height: 100%; background: linear-gradient(90deg, #007aff, #5856d6); transition: width 0.2s; }
+.ecg-canvas { width: 100%; height: 22px; display: block; margin-top: 3px; }
+
+main.stage {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 330px;
+  min-height: 0;
+  position: relative;
+}
+.viewport { position: relative; overflow: hidden; display: flex; flex-direction: column; background: #fafbfe; }
+#arenaCanvas { width: 100%; height: 100%; display: block; }
+.lens-panel {
+  position: absolute;
+  inset: 16px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  box-shadow: 0 12px 32px rgba(0,0,0,0.08);
+  padding: 20px;
+  display: none;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+}
+.lens-panel.visible { display: flex; }
+.organ-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.organ-box {
+  background: #f6f7fa;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  transition: all 0.25s;
+}
+.organ-box.breached { border-color: var(--crimson); background: #fff5f5; }
+.organ-box.patched { border-color: var(--cyan); background: #f0f7ff; }
+.proc-tree {
+  background: #f6f7fa;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  font-size: 12px;
+  color: var(--text);
+}
+.browser-mock {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  flex: 1;
+  position: relative;
+  padding: 18px;
+  overflow: hidden;
+}
+.deface-banner {
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: rgba(220,46,51,0.08);
+  border: 1px solid rgba(220,46,51,0.28);
+  color: var(--crimson);
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  margin-bottom: 12px;
+}
+.ghost-cursor {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--crimson);
+  background: rgba(220,46,51,0.28);
+  pointer-events: none;
+  transition: left 0.35s ease, top 0.35s ease;
+}
+.xray-visor {
+  position: absolute;
+  inset: 14px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--border);
+  box-shadow: 0 20px 48px rgba(0,0,0,0.14);
+  border-radius: 20px;
+  padding: 16px;
+  display: none;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  z-index: 30;
+}
+.xray-visor.open { display: grid; }
+.visor-col {
+  background: #f6f7fa;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.visor-title {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--cyan);
+  margin-bottom: 8px;
+}
+.visor-pre {
+  flex: 1;
+  margin: 0;
+  overflow: auto;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+.diff-add { color: #15803d; background: rgba(28,148,87,0.10); border-radius: 4px; padding: 0 4px; }
+.diff-del { color: #b91c1c; background: rgba(220,46,51,0.10); border-radius: 4px; padding: 0 4px; }
+
+aside.sidebar {
+  background: #ffffff;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.side-section { flex: 1; padding: 12px 14px; overflow-y: auto; border-bottom: 1px solid var(--border); }
+.side-hdr { font-size: 11.5px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+.feed-item {
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #f7f8fa;
+  border-left: 3px solid var(--crimson);
+  margin-bottom: 6px;
+  line-height: 1.4;
+  color: var(--text);
+}
+.thought-item {
+  font-size: 11.5px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #f7f8fa;
+  border-left: 3px solid var(--cyan);
+  margin-bottom: 6px;
+  color: var(--muted);
+}
+
+footer.director {
+  background: rgba(255, 255, 255, 0.94);
+  border-top: 1px solid var(--border);
+  padding: 10px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 25;
+}
+.caster-box {
+  background: #f4f7fd;
+  border: 1px solid rgba(0,122,255,0.16);
+  border-radius: 12px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.controls-row { display: flex; align-items: center; gap: 10px; }
+#scrubber { flex: 1; accent-color: var(--cyan); cursor: pointer; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="title-row">
+    <div class="brand">
+      <span class="badge badge-crimson">THE PIT · REPLAY</span>
+      <strong id="matchTitle" style="font-size:15px"></strong>
+      <span class="badge badge-cyan" id="modeBadge"></span>
+      <span class="badge badge-gold" id="cueBadge">DIRECTOR: MACRO_ARENA</span>
+    </div>
+    <div class="lens-bar">
+      <button class="btn active" id="btnMacro" onclick="setManualLens('MACRO_ARENA')">全局攻防态势</button>
+      <button class="btn" id="btnXray" onclick="setManualLens('XRAY_ORGAN')">靶机五层透视</button>
+      <button class="btn" id="btnWeb" onclick="setManualLens('LIVE_WEB_HIJACK')">目标网页实况</button>
+      <button class="btn" id="btnAuto" onclick="enableAutoDirector()">自动导播</button>
+      <button class="btn btn-visor mono" id="btnVisor" onclick="toggleVisor()">底层检视台 (Space)</button>
+    </div>
+  </div>
+  <div class="seats-strip" id="seatsStrip"></div>
+</header>
+
+<main class="stage">
+  <div class="viewport">
+    <canvas id="arenaCanvas"></canvas>
+
+    <div class="lens-panel" id="xrayPanel">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <strong style="color:var(--cyan);font-size:15px">🔬 靶机五层数字器官解剖截面 (Linux eBPF X-Ray)</strong>
+        <span class="mono" id="xrayHitLoc" style="color:var(--crimson);font-size:12px"></span>
+      </div>
+      <div class="organ-grid" id="organGrid"></div>
+      <div class="proc-tree mono" id="procTreeBox">Waiting for kernel sched_process_exec / vfs_write telemetry...</div>
+    </div>
+
+    <div class="lens-panel" id="webPanel">
+      <strong style="color:var(--gold);font-size:15px">🌐 目标真实网页被黑与幽灵光标现场 (LIVE_WEB_HIJACK)</strong>
+      <div class="browser-mock" id="browserMock">
+        <div class="deface-banner" id="defaceBanner">AEGIS SOVEREIGN VAULT — ONLINE</div>
+        <div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:8px" id="webUrl">http://target-grail:8080/api/vault/chat</div>
+        <pre class="mono" style="background:#f6f7fa;padding:12px;border-radius:12px;border:1px solid rgba(0,0,0,0.08);white-space:pre-wrap;color:#007aff" id="webPayload">Waiting for live payload injection...</pre>
+        <div class="mono" style="margin-top:10px;color:var(--crimson);font-weight:700" id="webMutation"></div>
+        <div class="ghost-cursor" id="ghostCursor" style="left:50%;top:50%"></div>
+      </div>
+    </div>
+
+    <div class="xray-visor" id="xrayVisor">
+      <div class="visor-col">
+        <div class="visor-title">⌨️ Kali Fighter PTY & eBPF execve</div>
+        <pre class="visor-pre mono" id="visorTerm"></pre>
+      </div>
+      <div class="visor-col">
+        <div class="visor-title">📡 Kernel OpenSSL uprobe / Raw Packet</div>
+        <pre class="visor-pre mono" id="visorPacket"></pre>
+      </div>
+      <div class="visor-col">
+        <div class="visor-title">🛠️ Live Hot-Patch Git Diff</div>
+        <div class="visor-pre mono" id="visorDiff"></div>
+      </div>
+    </div>
+  </div>
+
+  <aside class="sidebar">
+    <div class="side-section">
+      <div class="side-hdr">⚔️ 实时击杀播报 (Kill Feed)</div>
+      <div id="killFeedList"></div>
+    </div>
+    <div class="side-section" style="border-bottom:0">
+      <div class="side-hdr">🧠 大模型推理与算力燃烧 (Thoughts)</div>
+      <div id="thoughtList"></div>
+    </div>
+  </aside>
+</main>
+
+<footer class="director">
+  <div class="caster-box" id="casterText">🎙️ AI 解说员就绪 — 按下播放或拖动进度条回放整场生死战（按 Space 开启黑客源码/流量透视目镜）</div>
+  <div class="controls-row">
+    <button class="btn" id="playBtn" onclick="togglePlay()">⏸ 暂停</button>
+    <button class="btn" onclick="setSpeed(0.5)">0.5x</button>
+    <button class="btn active" id="spd1" onclick="setSpeed(1)">1x</button>
+    <button class="btn" id="spd2" onclick="setSpeed(2)">2x</button>
+    <button class="btn" id="spd4" onclick="setSpeed(4)">4x</button>
+    <input type="range" id="scrubber" min="0" max="1000" value="0" oninput="onScrub(this.value)">
+    <span class="mono" id="timeLabel" style="font-size:12px;color:var(--muted);min-width:115px;text-align:right">00:00 / 00:00</span>
+  </div>
+</footer>
+
+<script id="pit-replay-data" type="application/json">__PIT_REPLAY_JSON__</script>
+<script>
+const BUNDLE = JSON.parse(document.getElementById('pit-replay-data').textContent);
+const MATCH = BUNDLE.match;
+const TIMELINE = (BUNDLE.timeline || []).slice().sort((a, b) => a.ts_ms - b.ts_ms);
+
+const startTs = TIMELINE.length ? TIMELINE[0].ts_ms : 0;
+const endTs = TIMELINE.length ? Math.max(TIMELINE[TIMELINE.length - 1].ts_ms, startTs + 5000) : 10000;
+const durationMs = Math.max(1000, endTs - startTs);
+
+let playheadMs = 0;
+let playing = true;
+let speed = 1.0;
+let autoDirector = true;
+let visorOpen = false;
+let lastFrameTime = performance.now();
+let appliedIdx = -1;
+let projectiles = [];
+
+let liveSeats = {};
+let liveOrgans = [];
+let kingSeatId = '';
+let slaFlatlined = false;
+let ecgPhase = 0;
+
+function resetSimState() {
+  liveSeats = {};
+  (MATCH.seats || []).forEach((s, idx) => {
+    liveSeats[s.id] = {
+      id: s.id,
+      name: s.name,
+      color: s.team_color || '#00f0ff',
+      harness: s.harness_id,
+      score: 0,
+      tokensUsed: 0,
+      budget: MATCH.token_budget || 1000000,
+      manaPct: 100,
+      oom: false,
+      idx: idx
+    };
+  });
+  const baseOrgans = ((MATCH.targets && MATCH.targets[0] && MATCH.targets[0].organs) || [
+    {layer:'port_gate', label_zh:'端口大门', component:'0.0.0.0:8080'},
+    {layer:'route_vessel', label_zh:'路由血管', component:'/api/*'},
+    {layer:'code_organ', label_zh:'源码器官', component:'/app/server.py'},
+    {layer:'db_vault', label_zh:'数据库金库', component:'vault.db'},
+    {layer:'flag_heart', label_zh:'圣杯心脏', component:'/flag'}
+  ]);
+  liveOrgans = baseOrgans.map(o => ({...o, status:'intact', hp:100}));
+  kingSeatId = '';
+  slaFlatlined = false;
+  projectiles = [];
+  document.getElementById('killFeedList').innerHTML = '';
+  document.getElementById('thoughtList').innerHTML = '';
+  document.getElementById('visorTerm').textContent = '$ # Gladiator PTY & Kernel execve stream ready\n';
+  document.getElementById('visorPacket').textContent = '# Waiting for cleartext exploit packets...\n';
+  document.getElementById('visorDiff').innerHTML = '<span style="color:#64748b"># Waiting for live git diff nano-patch...</span>';
+  if (!TIMELINE.length) {
+    (MATCH.seats || []).forEach(s => {
+      liveSeats[s.id].score = s.score;
+      liveSeats[s.id].tokensUsed = s.tokens_used;
+      liveSeats[s.id].manaPct = s.mana_remaining_pct;
+      liveSeats[s.id].oom = s.mana_exhausted;
+    });
+  }
+}
+
+function applyEvent(ev, spawnVfx) {
+  const p = ev.payload || {};
+  switch (ev.kind) {
+    case 'TOKEN_BURN': {
+      const s = liveSeats[p.seat_id];
+      if (s) { s.tokensUsed = p.tokens_used; s.manaPct = p.mana_remaining_pct; }
+      break;
+    }
+    case 'MANA_DEPLETED': {
+      const s = liveSeats[p.seat_id];
+      if (s) { s.oom = true; s.manaPct = 0; }
+      break;
+    }
+    case 'THOUGHT_BUBBLE': {
+      const el = document.createElement('div');
+      el.className = 'thought-item';
+      el.innerHTML = `<strong style="color:var(--cyan)">${esc(p.seat_name || p.seat_id)}</strong>: ${esc(p.thought || '')}`;
+      document.getElementById('thoughtList').prepend(el);
+      break;
+    }
+    case 'EBPF_EVENT': {
+      const o = liveOrgans.find(x => x.layer === p.organ_layer);
+      if (o) {
+        if (p.vfx_type === 'NANO_PATCH_WELD') { o.status = 'patched'; o.hp = 100; }
+        else if (p.vfx_type === 'RCE_PARASITE_BREACH' || p.vfx_type === 'GRAIL_HEART_STOLEN' || p.vfx_type === 'ROOT_SHOCKWAVE') { o.status = 'breached'; o.hp = 15; }
+        else { if (o.status === 'intact') o.status = 'probed'; o.hp = Math.max(35, o.hp - 12); }
+      }
+      if (p.cmdline) {
+        document.getElementById('visorTerm').textContent += `[eBPF:${p.probe}] (PID ${p.pid}) $ ${p.cmdline}\n`;
+      }
+      if (p.cleartext_payload) {
+        document.getElementById('visorPacket').textContent = p.cleartext_payload + '\n\n' + document.getElementById('visorPacket').textContent;
+      }
+      if (p.process_tree && p.process_tree.length) {
+        document.getElementById('procTreeBox').textContent = 'Linux Process Lineage:\n  ' + p.process_tree.join('\n    └─ ');
+      }
+      if (p.hit_location) {
+        document.getElementById('xrayHitLoc').textContent = 'HIT: ' + p.hit_location;
+      }
+      if (spawnVfx && liveSeats[p.source_seat_id]) {
+        const reverse = p.vfx_type === 'REVERSE_SHELL_CHAIN';
+        const color = p.vfx_type === 'NANO_PATCH_WELD' ? '#00f0ff' : (p.vfx_type === 'SONAR_SWEEP' ? '#38bdf8' : '#ff2e4c');
+        projectiles.push({seatIdx: liveSeats[p.source_seat_id].idx, t: 0, color, reverse});
+      }
+      break;
+    }
+    case 'FLAG_CAPTURED': {
+      const s = liveSeats[p.seat_id];
+      if (s) s.score += (p.points_earned || 200);
+      if (p.victim_seat_id && liveSeats[p.victim_seat_id]) {
+        liveSeats[p.victim_seat_id].score += (p.victim_loss || -80);
+      }
+      break;
+    }
+    case 'GRAIL_CLAIMED': {
+      kingSeatId = p.king_seat_id;
+      document.getElementById('defaceBanner').textContent = `👑 ${(p.king_name || p.king_seat_id).toUpperCase()} CLAIMED THE HOLY GRAIL`;
+      break;
+    }
+    case 'SLA_HEARTBEAT': {
+      slaFlatlined = !p.healthy;
+      const s = liveSeats[p.owner_seat_id];
+      if (s && p.points_delta) s.score += p.points_delta;
+      break;
+    }
+    case 'PATCH_APPLIED': {
+      slaFlatlined = !p.verified;
+      const s = liveSeats[p.seat_id];
+      if (s && p.points_delta) s.score += p.points_delta;
+      if (p.diff) renderDiff(p.diff);
+      break;
+    }
+    case 'TERMINAL_OUTPUT': {
+      document.getElementById('visorTerm').textContent += `[PTY:${p.seat_name}] $ ${p.command}\n${p.output}\n`;
+      break;
+    }
+    case 'WEB_HIJACK': {
+      document.getElementById('webUrl').textContent = p.target_url || '';
+      document.getElementById('webPayload').textContent = p.injected_input || '';
+      document.getElementById('webMutation').textContent = p.dom_mutation || '';
+      if (p.deface_banner) document.getElementById('defaceBanner').textContent = p.deface_banner;
+      const cur = document.getElementById('ghostCursor');
+      cur.style.left = Math.round((p.cursor_x || 0.6) * 85) + '%';
+      cur.style.top = Math.round((p.cursor_y || 0.45) * 80) + '%';
+      break;
+    }
+    case 'KILL_FEED': {
+      const el = document.createElement('div');
+      el.className = 'feed-item';
+      el.style.borderLeftColor = p.actor_color || '#ff2e4c';
+      el.textContent = p.headline || '';
+      document.getElementById('killFeedList').prepend(el);
+      break;
+    }
+    case 'CASTER_LINE': {
+      document.getElementById('casterText').textContent = p.text || '';
+      break;
+    }
+    case 'CAMERA_CUE': {
+      document.getElementById('cueBadge').textContent = `DIRECTOR: ${p.lens}`;
+      if (autoDirector && p.lens) switchLensUI(p.lens);
+      break;
+    }
+  }
+  renderHUD();
+}
+
+function renderDiff(diff) {
+  const html = diff.split('\n').map(line => {
+    if (line.startsWith('+') && !line.startsWith('+++')) return `<div class="diff-add">${esc(line)}</div>`;
+    if (line.startsWith('-') && !line.startsWith('---')) return `<div class="diff-del">${esc(line)}</div>`;
+    return `<div>${esc(line)}</div>`;
+  }).join('');
+  document.getElementById('visorDiff').innerHTML = html;
+}
+
+function renderHUD() {
+  const sorted = Object.values(liveSeats).sort((a, b) => (b.score - a.score) || (a.tokensUsed - b.tokensUsed));
+  document.getElementById('seatsStrip').innerHTML = sorted.map((s, rank) => `
+    <div class="seat-card ${kingSeatId === s.id ? 'king' : ''} ${s.oom ? 'oom' : ''}">
+      <div class="seat-head">
+        <span><span style="color:${s.color}">●</span> #${rank+1} ${esc(s.name)} ${kingSeatId === s.id ? '👑' : ''}</span>
+        <span class="seat-score mono">${s.score} pts</span>
+      </div>
+      <div class="bar-row">
+        <span class="mono">${s.oom ? '💀 402 OOM' : '💎 ' + s.manaPct.toFixed(0) + '%'}</span>
+        <div class="mana-track"><div class="mana-fill" style="width:${Math.max(0, s.manaPct)}%"></div></div>
+      </div>
+      <canvas class="ecg-canvas" width="180" height="22"></canvas>
+    </div>
+  `).join('');
+
+  document.getElementById('organGrid').innerHTML = liveOrgans.map(o => `
+    <div class="organ-box ${o.status}">
+      <div style="font-size:12.5px;font-weight:700;color:#1a1a1e">${esc(o.label_zh || o.layer)}</div>
+      <div class="mono" style="font-size:10px;color:var(--muted);margin:4px 0">${esc(o.component || '')}</div>
+      <div class="mono" style="font-size:11px;font-weight:700;color:${o.status==='breached'?'var(--crimson)':(o.status==='patched'?'var(--cyan)':'var(--emerald)')}">
+        ${o.status.toUpperCase()} · HP ${o.hp}%
+      </div>
+    </div>
+  `).join('');
+}
+
+function switchLensUI(lens) {
+  document.getElementById('xrayPanel').classList.toggle('visible', lens === 'XRAY_ORGAN');
+  document.getElementById('webPanel').classList.toggle('visible', lens === 'LIVE_WEB_HIJACK');
+  document.getElementById('btnMacro').classList.toggle('active', lens === 'MACRO_ARENA');
+  document.getElementById('btnXray').classList.toggle('active', lens === 'XRAY_ORGAN');
+  document.getElementById('btnWeb').classList.toggle('active', lens === 'LIVE_WEB_HIJACK');
+}
+
+function setManualLens(lens) {
+  autoDirector = false;
+  document.getElementById('btnAuto').classList.remove('active');
+  switchLensUI(lens);
+}
+
+function enableAutoDirector() {
+  autoDirector = true;
+  document.getElementById('btnAuto').classList.add('active');
+}
+
+function toggleVisor() {
+  visorOpen = !visorOpen;
+  document.getElementById('xrayVisor').classList.toggle('open', visorOpen);
+  document.getElementById('btnVisor').classList.toggle('active', visorOpen);
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { e.preventDefault(); toggleVisor(); }
+  if (e.key === '1') setManualLens('MACRO_ARENA');
+  if (e.key === '2') setManualLens('XRAY_ORGAN');
+  if (e.key === '3') setManualLens('LIVE_WEB_HIJACK');
+});
+
+function togglePlay() {
+  playing = !playing;
+  if (playing && playheadMs >= durationMs) seekTo(0);
+  document.getElementById('playBtn').textContent = playing ? '⏸ 暂停' : '▶ 播放';
+}
+
+function setSpeed(s) {
+  speed = s;
+  ['spd1','spd2','spd4'].forEach(id => document.getElementById(id)?.classList.remove('active'));
+  if (s === 1) document.getElementById('spd1').classList.add('active');
+  if (s === 2) document.getElementById('spd2').classList.add('active');
+  if (s === 4) document.getElementById('spd4').classList.add('active');
+}
+
+function onScrub(val) {
+  seekTo((Number(val) / 1000) * durationMs);
+}
+
+function seekTo(ms) {
+  playheadMs = Math.max(0, Math.min(durationMs, ms));
+  resetSimState();
+  appliedIdx = -1;
+  const cutoff = startTs + playheadMs;
+  for (let i = 0; i < TIMELINE.length; i++) {
+    if (TIMELINE[i].ts_ms <= cutoff) {
+      applyEvent(TIMELINE[i], false);
+      appliedIdx = i;
+    } else {
+      break;
+    }
+  }
+}
+
+function drawArenaCanvas(dt) {
+  const canvas = document.getElementById('arenaCanvas');
+  const rect = canvas.getBoundingClientRect();
+  if (canvas.width !== rect.width || canvas.height !== rect.height) {
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+  }
+  const ctx = canvas.getContext('2d');
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  const radius = Math.min(cx, cy) * 0.68;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  [0.32, 0.58, 0.85, 1.0].forEach((r, i) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius * r, 0, Math.PI * 2);
+    ctx.strokeStyle = i === 3 ? 'rgba(0,0,0,0.09)' : 'rgba(0,0,0,0.05)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  });
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, 42, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = kingSeatId ? '#d1800a' : (slaFlatlined ? '#dc2e33' : '#007aff');
+  ctx.stroke();
+  ctx.fillStyle = '#1a1a1e';
+  ctx.font = 'bold 11.5px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('中央靶机', cx, cy + 4);
+
+  const seatsArr = (MATCH.seats || []);
+  const positions = seatsArr.map((s, i) => {
+    const ang = (i / Math.max(1, seatsArr.length)) * Math.PI * 2 - Math.PI / 2;
+    return {
+      x: cx + Math.cos(ang) * radius * 0.85,
+      y: cy + Math.sin(ang) * radius * 0.85,
+      seat: liveSeats[s.id] || {name: s.name, color: s.team_color || '#007aff'}
+    };
+  });
+
+  projectiles = projectiles.filter(p => p.t < 1.0);
+  projectiles.forEach(p => {
+    p.t += dt * 0.9;
+    const pos = positions[p.seatIdx];
+    if (!pos) return;
+    const sx = p.reverse ? cx : pos.x;
+    const sy = p.reverse ? cy : pos.y;
+    const tx = p.reverse ? pos.x : cx;
+    const ty = p.reverse ? pos.y : cy;
+    const px = sx + (tx - sx) * Math.min(1, p.t);
+    const py = sy + (ty - sy) * Math.min(1, p.t);
+
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(px, py);
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = p.reverse ? 2.8 : 2.2;
+    if (p.reverse) ctx.setLineDash([6, 4]); else ctx.setLineDash([]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.beginPath();
+    ctx.arc(px, py, 5, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.fill();
+  });
+
+  positions.forEach(pos => {
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, 21, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.lineWidth = 2.4;
+    ctx.strokeStyle = pos.seat.oom ? '#dc2e33' : pos.seat.color;
+    ctx.stroke();
+    ctx.fillStyle = '#1a1a1e';
+    ctx.font = 'bold 11.5px -apple-system, sans-serif';
+    ctx.fillText(pos.seat.name, pos.x, pos.y + 34);
+  });
+
+  ecgPhase += dt * 8;
+  document.querySelectorAll('.ecg-canvas').forEach(c => {
+    const g = c.getContext('2d');
+    g.clearRect(0, 0, c.width, c.height);
+    g.beginPath();
+    g.strokeStyle = slaFlatlined ? '#ff2e4c' : '#10b981';
+    g.lineWidth = 1.5;
+    for (let x = 0; x < c.width; x += 3) {
+      let y = c.height / 2;
+      if (!slaFlatlined) {
+        const m = (x + ecgPhase * 18) % 60;
+        if (m > 24 && m < 28) y -= 8;
+        else if (m >= 28 && m < 32) y += 5;
+        else if (m >= 38 && m < 44) y -= 3;
+      }
+      if (x === 0) g.moveTo(x, y); else g.lineTo(x, y);
+    }
+    g.stroke();
+  });
+}
+
+function fmtSec(ms) {
+  const s = Math.floor(ms / 1000);
+  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function loop(now) {
+  const dt = Math.min(0.1, (now - lastFrameTime) / 1000);
+  lastFrameTime = now;
+
+  if (playing) {
+    playheadMs += dt * 1000 * speed;
+    if (playheadMs >= durationMs) {
+      playheadMs = durationMs;
+      playing = false;
+      document.getElementById('playBtn').textContent = '▶ 重播';
+    }
+    const cutoff = startTs + playheadMs;
+    while (appliedIdx + 1 < TIMELINE.length && TIMELINE[appliedIdx + 1].ts_ms <= cutoff) {
+      appliedIdx++;
+      applyEvent(TIMELINE[appliedIdx], true);
+    }
+    document.getElementById('scrubber').value = Math.round((playheadMs / durationMs) * 1000);
+    document.getElementById('timeLabel').textContent = `${fmtSec(playheadMs)} / ${fmtSec(durationMs)}`;
+  }
+
+  drawArenaCanvas(dt);
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('matchTitle').textContent = MATCH.title || MATCH.id;
+document.getElementById('modeBadge').textContent = (MATCH.mode || 'grail').toUpperCase();
+document.getElementById('btnAuto').classList.add('active');
+resetSimState();
+renderHUD();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

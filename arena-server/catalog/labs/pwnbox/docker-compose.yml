@@ -1,0 +1,9 @@
+services:
+  pwnbox:
+    image: skysider/pwndocker:latest
+    container_name: arena-pwnbox
+    command: ["sleep", "infinity"]
+    volumes:
+      - /srv/arena/shared:/shared
+    mem_limit: 3g
+    restart: unless-stopped

@@ -1,0 +1,38 @@
+{
+  "source": "curated",
+  "difficulty": 3,
+  "tags": [
+    "LLM",
+    "Prompt Injection",
+    "Garak",
+    "越狱",
+    "Agent"
+  ],
+  "mitre": [
+    "T1059",
+    "T1552"
+  ],
+  "access": [
+    {
+      "label": "靶场聊天",
+      "port": 8088,
+      "scheme": "http",
+      "path": "/"
+    }
+  ],
+  "credentials": "无",
+  "notes": "",
+  "cpu": 2.5,
+  "ram_mb": 4096,
+  "build": true,
+  "id": "llm-redteam",
+  "name": "LLM 红队实验室",
+  "subtitle": "提示注入 · 越狱 · Agent 攻防",
+  "category": "ai",
+  "summary": "自带一个带隐藏系统提示与弱过滤的对话靶场，并预装 garak 扫描器，覆盖 OWASP LLM Top 10 的核心攻击面。",
+  "objectives": [
+    "用直接与间接提示注入套出系统提示中的 flag",
+    "用 garak 对靶场跑一轮自动化探测并解读报告",
+    "设计一个能抵抗注入的系统提示并对比效果"
+  ]
+}

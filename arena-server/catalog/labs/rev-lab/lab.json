@@ -1,0 +1,31 @@
+{
+  "source": "curated",
+  "difficulty": 3,
+  "tags": [
+    "radare2",
+    "angr",
+    "Z3",
+    "binwalk",
+    "Ghidra 兼容"
+  ],
+  "mitre": [
+    "T1027"
+  ],
+  "access": [],
+  "credentials": "",
+  "notes": "题目位于 /challenges。",
+  "cpu": 2.5,
+  "ram_mb": 4096,
+  "build": true,
+  "id": "rev-lab",
+  "name": "逆向工程实验室",
+  "subtitle": "静态 + 动态分析工具箱",
+  "category": "binary",
+  "summary": "为逆向与符号执行准备的工作站：radare2、angr、Z3、capstone、binwalk、strace 与自编 crackme 套件。",
+  "objectives": [
+    "用 radare2 静态分析并还原 3 个 crackme 的校验逻辑",
+    "用 angr 求解其中一个 flag",
+    "总结静态与符号执行各自的适用边界"
+  ],
+  "terminal": "docker exec -it arena-rev-lab bash"
+}

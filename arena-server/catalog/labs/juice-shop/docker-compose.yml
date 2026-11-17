@@ -1,0 +1,8 @@
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: arena-juice-shop
+    ports:
+      - "3000:3000"
+    mem_limit: 2g
+    restart: unless-stopped

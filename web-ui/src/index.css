@@ -1,0 +1,150 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --apple-bg: #f4f4f7;
+  --apple-sidebar: rgba(246, 247, 250, 0.82);
+  --apple-card: #ffffff;
+  --apple-blue: #007aff;
+  --apple-blue-deep: #0061db;
+  --apple-ink: #1a1a1e;
+  --apple-ink-secondary: #61626a;
+  --apple-ink-tertiary: #6f7078;
+  --apple-stroke: rgba(0, 0, 0, 0.068);
+  --apple-stroke-strong: rgba(0, 0, 0, 0.13);
+  --apple-red: #dc2e33;
+  --apple-green: #1c9457;
+  --apple-amber: #d1800a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--apple-bg);
+  color: var(--apple-ink);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Inter", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code,
+pre,
+.font-mono {
+  font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Monaco, monospace;
+}
+
+/* Universal Pointing-Hand Cursor (`👆`) on ALL Interactive Controls */
+a,
+button:not(:disabled),
+[role="button"],
+select:not(:disabled),
+summary,
+label[for],
+input[type="range"]:not(:disabled),
+input[type="checkbox"]:not(:disabled),
+input[type="radio"]:not(:disabled),
+.cursor-pointer,
+.apple-clickable {
+  cursor: pointer !important;
+}
+
+button:disabled,
+select:disabled,
+input:disabled {
+  cursor: not-allowed !important;
+}
+
+/* Apple App Store Surface System (Aligned 1:1 with Aexus Spear) */
+.apple-canvas-bg {
+  background:
+    radial-gradient(900px circle at 92% -8%, rgba(0, 122, 255, 0.055), transparent 58%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.88) 0%, #f4f4f7 260px, #f2f3f7 100%);
+}
+
+.apple-card {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.065);
+  border-radius: 20px;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.042);
+}
+
+.apple-card-interactive {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.065);
+  border-radius: 20px;
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.042);
+  cursor: pointer !important;
+  transition: transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    border-color 0.18s ease;
+}
+
+.apple-card-interactive:hover {
+  transform: translateY(-1.5px);
+  border-color: rgba(0, 0, 0, 0.115);
+  box-shadow: 0 11px 24px rgba(0, 0, 0, 0.085);
+}
+
+.apple-card-interactive:active {
+  transform: scale(0.992);
+}
+
+.apple-card-selected {
+  border-color: rgba(0, 122, 255, 0.65) !important;
+  box-shadow: 0 10px 24px rgba(0, 122, 255, 0.12) !important;
+}
+
+.apple-frosted-sidebar {
+  background: rgba(246, 247, 250, 0.86);
+  backdrop-filter: saturate(180%) blur(24px);
+  -webkit-backdrop-filter: saturate(180%) blur(24px);
+}
+
+.apple-frosted-topbar {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: saturate(180%) blur(22px);
+  -webkit-backdrop-filter: saturate(180%) blur(22px);
+}
+
+/* Subtle macOS Light Scrollbar */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.14);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.26);
+}
+
+@keyframes killSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-kill-in {
+  animation: killSlideIn 0.2s ease-out forwards;
+}

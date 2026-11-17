@@ -1,0 +1,37 @@
+{
+  "source": "curated",
+  "difficulty": 2,
+  "tags": [
+    "OSINT",
+    "情报",
+    "资产发现",
+    "社工"
+  ],
+  "mitre": [
+    "T1590",
+    "T1589"
+  ],
+  "access": [
+    {
+      "label": "SpiderFoot",
+      "port": 5001,
+      "scheme": "http",
+      "path": "/"
+    }
+  ],
+  "credentials": "首次进入自行创建账号",
+  "notes": "",
+  "cpu": 2.5,
+  "ram_mb": 4096,
+  "build": true,
+  "id": "osint",
+  "name": "SpiderFoot OSINT",
+  "subtitle": "开源情报自动化",
+  "category": "misc",
+  "summary": "自动化开源情报平台，支持域名、IP、邮箱、用户名等 200+ 数据源模块，适合授权范围内的资产测绘训练。",
+  "objectives": [
+    "对演示域名执行一次全模块扫描",
+    "梳理目标的子域、邮箱与泄露凭据关系图",
+    "导出报告并标注高风险暴露面"
+  ]
+}
